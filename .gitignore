@@ -1,0 +1,9 @@
+dnsd
+dns-cli
+entry_test
+admit_test
+build/
+*.o
+*.db
+*.db-shm
+*.db-wal
