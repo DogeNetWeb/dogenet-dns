@@ -7,3 +7,8 @@ build/
 *.db
 *.db-shm
 *.db-wal
+state_dns_test
+wire_test
+zone_test
+dnsd_core_test
+*.dSYM/

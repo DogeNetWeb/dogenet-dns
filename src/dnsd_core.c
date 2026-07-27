@@ -177,16 +177,24 @@ static void serve_tcp(DnsdCore *dc) {
 int dnsd_core_bind(DnsdCore *dc, const char *addr, int port) {
     struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET; sa.sin_port = htons((uint16_t)port);
-    inet_pton(AF_INET, addr, &sa.sin_addr);
+    /* A malformed address must NOT fall through to the memset's 0.0.0.0: that
+     * would silently turn an intended loopback bind into a wildcard one and
+     * expose the resolver to the whole network. */
+    if (inet_pton(AF_INET, addr ? addr : "", &sa.sin_addr) != 1) {
+        fprintf(stderr, "dnsd: bad bind address '%s'\n", addr ? addr : "(null)");
+        dc->ufd = dc->tfd = -1; return -1;
+    }
     int one = 1;
 
     dc->ufd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (dc->ufd < 0) { perror("socket dns/udp"); dc->tfd = -1; return -1; }
     setsockopt(dc->ufd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     if (bind(dc->ufd, (struct sockaddr *)&sa, sizeof sa) < 0) {
         perror("bind dns/udp"); close(dc->ufd); dc->ufd = -1; dc->tfd = -1; return -1;
     }
 
     dc->tfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (dc->tfd < 0) { perror("socket dns/tcp"); return 0; }   /* UDP-only fallback */
     setsockopt(dc->tfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     if (bind(dc->tfd, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(dc->tfd, 16) < 0) {
         perror("bind dns/tcp"); close(dc->tfd); dc->tfd = -1;   /* UDP-only fallback */

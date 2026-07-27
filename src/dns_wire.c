@@ -7,14 +7,19 @@
 /* ── name reading (with compression-pointer support) ───────────────────── */
 
 /* Read a wire name starting at buf[*off] into `out` (dotted, lowercased).
+ * If `orig` is non-NULL it receives the same name with its octets UNFOLDED —
+ * exactly as they appeared on the wire — so a responder can echo the question
+ * verbatim (RFC 1035 §4.1.2) while still matching case-insensitively. It must
+ * be at least out_cap bytes.
  * Follows one or more 0xC0 compression pointers, guarding against loops.
  * Advances *off past the name in the *current* stream (i.e. to just after the
  * first pointer, per RFC 1035). Returns 0 on success, -1 on malformed. */
 static int read_name(const uint8_t *buf, size_t len, size_t *off,
-                     char *out, size_t out_cap)
+                     char *out, size_t out_cap, char *orig)
 {
     size_t pos = *off;
     size_t opos = 0;
+    size_t wire = 1;           /* octets the name occupies, incl. the root label */
     int    jumped = 0;
     int    guard = 0;          /* bound pointer chains */
     size_t advanced_to = 0;    /* where *off lands (first pointer, if any) */
@@ -39,16 +44,20 @@ static int read_name(const uint8_t *buf, size_t len, size_t *off,
             if (!jumped) advanced_to = pos + 1;
             break;
         }
+        wire += (size_t)l + 1;
+        if (wire > DNS_NAME_MAX) return -1;   /* RFC 1035 §2.3.4: 255 octets */
         pos++;
         if (pos + l > len) return -1;
-        if (opos && opos + 1 < out_cap) out[opos++] = '.';
+        if (opos && opos + 1 < out_cap) { if (orig) orig[opos] = '.'; out[opos++] = '.'; }
         for (uint8_t i = 0; i < l; i++) {
             if (opos + 1 >= out_cap) return -1;
+            if (orig) orig[opos] = (char)buf[pos + i];
             out[opos++] = (char)tolower(buf[pos + i]);
         }
         pos += l;
     }
     out[opos] = '\0';
+    if (orig) orig[opos] = '\0';
     *off = advanced_to;
     return 0;
 }
@@ -56,8 +65,8 @@ static int read_name(const uint8_t *buf, size_t len, size_t *off,
 /* Skip a wire name (following pointers) — discards the decoded text. */
 static int skip_name(const uint8_t *buf, size_t len, size_t *off)
 {
-    char tmp[256];
-    return read_name(buf, len, off, tmp, sizeof tmp);
+    char tmp[DNS_NAME_MAX + 1];
+    return read_name(buf, len, off, tmp, sizeof tmp, NULL);
 }
 
 /* Skip one RR (name + fixed fields + rdata). */
@@ -84,7 +93,8 @@ int dns_parse_query(const uint8_t *buf, size_t len, dns_query *q)
     q->edns = 0; q->edns_version = 0; q->udp_payload = 0;
 
     size_t off = 12;
-    if (read_name(buf, len, &off, q->qname, sizeof q->qname) != 0) return -1;
+    if (read_name(buf, len, &off, q->qname, sizeof q->qname, q->qname_orig) != 0)
+        return -1;
     if (off + 4 > len) return -1;
     q->qtype  = (uint16_t)((buf[off]     << 8) | buf[off + 1]);
     q->qclass = (uint16_t)((buf[off + 2] << 8) | buf[off + 3]);
@@ -127,6 +137,8 @@ int dns_encode_name(uint8_t *out, size_t cap, const char *dotted)
         const char *dot = strchr(p, '.');
         size_t l = dot ? (size_t)(dot - p) : strlen(p);
         if (l == 0 || l > 63) return -1;         /* empty/oversize label */
+        /* RFC 1035 §2.3.4: 255 octets total, root label included. */
+        if (o + 1 + l + 1 > DNS_NAME_MAX) return -1;
         if (o + 1 + l >= cap) return -1;
         out[o++] = (uint8_t)l;
         memcpy(out + o, p, l);
@@ -171,8 +183,12 @@ void dns_resp_begin(dns_resp *r, uint8_t *buf, size_t cap,
     put16(buf + 10, 0);  /* ARCOUNT */
     r->len = 12;
 
-    /* Question section: re-emit qname + qtype + qclass. */
-    int n = dns_encode_name(buf + r->len, cap - r->len, q->qname);
+    /* Question section: echo the question EXACTLY as it was asked — the
+     * original octets, not the folded lookup key (RFC 1035 §4.1.2). Callers
+     * that fill a dns_query by hand and leave qname_orig empty fall back to
+     * qname (identical for the root name, where both are empty). */
+    const char *qn = q->qname_orig[0] ? q->qname_orig : q->qname;
+    int n = dns_encode_name(buf + r->len, cap - r->len, qn);
     if (n < 0 || r->len + (size_t)n + 4 > cap) { r->ok = 0; return; }
     r->len += (size_t)n;
     put16(buf + r->len, q->qtype);  r->len += 2;

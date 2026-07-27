@@ -27,6 +27,11 @@ enum {
 
 enum { DNS_CLASS_IN = 1 };
 
+/* RFC 1035 §2.3.4: a domain name is at most 255 octets on the wire (label
+ * length bytes and the root label included). Both the decoder and the encoder
+ * enforce it — the 256-byte text buffers below are not the limit. */
+#define DNS_NAME_MAX 255
+
 /* RCODEs we use. */
 enum {
     DNS_RCODE_NOERROR  = 0,
@@ -37,11 +42,16 @@ enum {
 };
 
 /* A parsed query (first question only). qname is dotted, lowercased, no
- * trailing dot; the root is the empty string. */
+ * trailing dot; the root is the empty string. qname_orig is the same name with
+ * the query's own octets preserved: LOOKUPS use qname (DNS matching is case
+ * blind), but the response must echo the question exactly as it was asked
+ * (RFC 1035 §4.1.2) — case folding it would break DNS-0x20 case randomisation,
+ * which clients rely on to detect off-path spoofing. */
 typedef struct {
     uint16_t id;
     uint16_t flags;   /* raw header flags of the request (RD is echoed back) */
     char     qname[256];
+    char     qname_orig[256];
     uint16_t qtype;
     uint16_t qclass;
     /* EDNS0 (RFC 6891), parsed from an OPT pseudo-RR in the additional section.

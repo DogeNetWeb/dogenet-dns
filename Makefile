@@ -106,3 +106,44 @@ clean:
 	rm -rf build dnsd dns-cli state_dns_test
 
 .PHONY: all check clean
+
+# ── focused proofs: the wire parser, the zone parser, the resolver core ──────
+# wire_test links NOTHING but src/dns_wire.c — it is a pure adversarial-decode
+# harness (round-trip property test + malicious-packet battery + truncation and
+# mutation fuzz behind a guard page and an alarm() watchdog), so it needs no
+# store, no mesh and no chain. zone_test adds zone.c and the sp_state key codec;
+# dnsd_core_test adds the resolver core and answers queries against an in-memory
+# store — both on state_dns_test's light composition (the mesh lib + the
+# indexer's vendored secp), never the indexer sources.
+WIRE_SRC := test/wire_test.c src/dns_wire.c
+ZONE_SRC := test/zone_test.c src/zone.c src/dns_wire.c src/dns_state.c
+CORE_SRC := test/dnsd_core_test.c src/dnsd_core.c src/dns_state.c src/zone.c src/dns_wire.c
+
+wire_test: $(WIRE_SRC) $(wildcard src/*.h)
+	$(CC) $(CFLAGS) -Isrc -o $@ $(WIRE_SRC)
+
+zone_test: $(ZONE_SRC) $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(ZONE_SRC) $(NETLIB) $(IDXSECP) -lsqlite3
+
+dnsd_core_test: $(CORE_SRC) $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(CORE_SRC) $(NETLIB) $(IDXSECP) -lsqlite3
+
+# Everything, including the existing codec/store proof. Each binary prints its
+# own "N ok, M failed" line and exits non-zero on any FAIL; check-all runs them
+# all before reporting, so one failure never hides the rest.
+check-all: check wire_test zone_test dnsd_core_test
+	@rc=0; for t in wire_test zone_test dnsd_core_test; do \
+	  echo "=== $$t ==="; ./$$t || rc=1; echo; done; \
+	  if [ $$rc -ne 0 ]; then echo "check-all: FAILURES above"; else echo "check-all: all passed"; fi; \
+	  exit $$rc
+
+# A longer adversarial soak over several seeds (~2M decodes per seed).
+check-fuzz: wire_test
+	@for s in 1 7 42 999 20260726 123456789; do \
+	  echo "=== wire_test seed $$s ==="; WIRE_SEED=$$s WIRE_FUZZ_X=25 ./wire_test | tail -1 || exit 1; \
+	done
+
+clean-tests:
+	rm -f wire_test zone_test dnsd_core_test
+
+.PHONY: check-all check-fuzz clean-tests
