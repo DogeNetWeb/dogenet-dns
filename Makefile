@@ -144,6 +144,26 @@ check-fuzz: wire_test
 	done
 
 clean-tests:
-	rm -f wire_test zone_test dnsd_core_test
+	rm -f wire_test zone_test dnsd_core_test net_test
 
 .PHONY: check-all check-fuzz clean-tests
+
+# ── the adversarial gossip suite (src/dns_net.c) ─────────────────────────────
+# Deliberately OUTSIDE check-all: its last section proves a real convergence
+# defect (two nodes whose 8 KB budgets are both full of different records
+# ping-pong inv→get→dat forever, because on_zdat answers a no-change dump with
+# another inv), so it exits non-zero. Folding it into check-all would make the
+# green suite red for a reason that is not a regression — the same split
+# pepenet-tls uses for check-deep.
+#
+#   make check-gossip     peer table, hostile frames, 200k-mutation fuzz,
+#                         inv/get/dat semantics, the hold queue, convergence
+NET_SRC := test/net_test.c src/dns_net.c src/dns_state.c src/zone.c src/dns_wire.c
+
+net_test: $(NET_SRC) $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(NET_SRC) $(NETLIB) $(IDXSECP) -lsqlite3
+
+check-gossip: net_test
+	./net_test
+
+.PHONY: check-gossip

@@ -12,3 +12,4 @@ wire_test
 zone_test
 dnsd_core_test
 *.dSYM/
+net_test
