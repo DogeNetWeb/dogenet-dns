@@ -276,6 +276,8 @@ static int usage(const char *p) {
         "  --listen <port>    CHAIN serve port (0 = dial-only)       [default 0]\n"
         "                     a public seed passes its chain port (pep 33874)\n"
         "  --peer host:port   a chain peer to dial for the mesh (repeatable)\n"
+        "                     default pep: pepenet.shibpost.com:33874 +\n"
+        "                     net.pepecoin.services:33874; doge: shibpost:22556\n"
         "  --sync-peer <ip>   pin the chain-sync peer                [default auto]\n"
         "  --no-sync          do not self-sync (an external indexer feeds --db)\n"
         "  --dns-addr <ip>    UDP/TCP DNS listen addr                [127.0.0.1]\n"
@@ -326,6 +328,18 @@ int main(int argc, char **argv) {
         else return usage(argv[0]);
     }
     if (!db || !store) return usage(argv[0]);
+
+    /* Overlay seeds ride the chain wire (idx_serve dial list). Omit --peer
+       and a pep/doge node still finds the mesh; an explicit --peer replaces
+       the default rather than appending. testnet/regtest stay silent. */
+    if (n_peers == 0) {
+        if (!strcmp(coin, "pep")) {
+            snprintf(peers[n_peers++], sizeof peers[0], "pepenet.shibpost.com:33874");
+            snprintf(peers[n_peers++], sizeof peers[0], "net.pepecoin.services:33874");
+        } else if (!strcmp(coin, "doge")) {
+            snprintf(peers[n_peers++], sizeof peers[0], "pepenet.shibpost.com:22556");
+        }
+    }
 
     if (keyarg) {
         if (!load_key(keyarg, g_priv) || !sp_pubkey(g_priv, g_pub)) { fprintf(stderr, "bad --key\n"); return 1; }

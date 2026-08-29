@@ -76,7 +76,10 @@ make check         # codec + LWW admission + gossip framing proof (state_dns_tes
 
 ## Run — two nodes gossiping a zone over the chain wire
 
-`--listen` is the node's **chain serve port**; `--peer` is a **chain peer to dial**.
+`--listen` is the node's **chain serve port**; `--peer` is a **chain peer to dial**
+(repeatable). On pep, omitting `--peer` dials the two public overlay seeds
+(`pepenet.shibpost.com:33874` and `net.pepecoin.services:33874`); on doge,
+`pepenet.shibpost.com:22556`. An explicit `--peer` replaces that default.
 The two nodes handshake as chain peers and zones gossip over that connection.
 (`--no-sync` here because the demo runs off the already-synced `pep.db`, not the
 live network.)
@@ -113,8 +116,9 @@ serve as a shared authoritative `.pepe` resolver. To expose one:
 ```sh
 # a real public seed listens on its chain port (pep 33874) and self-syncs;
 # --sync-peer pins a bootstrap chain peer (default: cached peers + DNS seeds)
-./dnsd --db $DB --store /tmp/mirror.db --listen 33874 --peer <hub>:33874 \
+./dnsd --db $DB --store /tmp/mirror.db --listen 33874 \
        --dns-addr 0.0.0.0 --dns-port 53           # no --tls-redirect on a public mirror
+# omit --peer to dial the public pep overlay seeds; pass --peer to pin one
 ```
 
 - **UDP + TCP** on the same port. TCP (RFC 7766) carries answers past the UDP
