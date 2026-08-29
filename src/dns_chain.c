@@ -13,6 +13,7 @@ struct DnsChain {
     sqlite3_stmt *q_owner;    /* SELECT owner, lease_expiry FROM names WHERE name=? */
     sqlite3_stmt *q_hash;     /* SELECT hash FROM blocks WHERE height=? */
     sqlite3_stmt *q_tip;      /* SELECT v FROM meta WHERE k='height' */
+    sqlite3_stmt *q_peer;     /* SELECT v FROM meta WHERE k='peer_height' */
 };
 
 /* Statements prepare LAZILY: on a first boot the indexer may not have created
@@ -48,6 +49,7 @@ void dns_chain_close(DnsChain *c) {
     if (c->q_owner) sqlite3_finalize(c->q_owner);
     if (c->q_hash)  sqlite3_finalize(c->q_hash);
     if (c->q_tip)   sqlite3_finalize(c->q_tip);
+    if (c->q_peer)  sqlite3_finalize(c->q_peer);
     if (c->db)      sqlite3_close(c->db);
     free(c);
 }
@@ -103,4 +105,24 @@ static int oc_header(void *u, uint32_t height, uint8_t out[32]) {
 SpChainOracle dns_chain_oracle(DnsChain *c) {
     SpChainOracle o = { c, oc_owner, oc_header, oc_tip };
     return o;
+}
+
+static int64_t meta_i64(DnsChain *c, sqlite3_stmt **slot, const char *sql) {
+    int64_t v = 0;
+    if (!ensure(c, slot, sql)) return 0;
+    sqlite3_reset(*slot);
+    if (sqlite3_step(*slot) == SQLITE_ROW) {
+        const char *s = (const char *)sqlite3_column_text(*slot, 0);
+        if (s) v = strtoll(s, NULL, 10);
+    }
+    sqlite3_reset(*slot);
+    return v;
+}
+
+void dns_chain_sync(DnsChain *c, int64_t *height, int64_t *peer_height) {
+    if (height)      *height = 0;
+    if (peer_height) *peer_height = 0;
+    if (!c) return;
+    if (height)      *height = meta_i64(c, &c->q_tip,  "SELECT v FROM meta WHERE k='height'");
+    if (peer_height) *peer_height = meta_i64(c, &c->q_peer, "SELECT v FROM meta WHERE k='peer_height'");
 }

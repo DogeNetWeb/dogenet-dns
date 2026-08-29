@@ -13,11 +13,15 @@
 #define DNS_CHAIN_H
 
 #include "pepenet/state.h"
+#include <stdint.h>
 
 typedef struct DnsChain DnsChain;
 
 DnsChain     *dns_chain_open(const char *indexer_db_path);   /* NULL on failure */
 void          dns_chain_close(DnsChain *c);
 SpChainOracle dns_chain_oracle(DnsChain *c);
+/* this node's fold height and the last peer tip persisted by the indexer
+ * (0 if unknown). WAL-safe read; used by the tls fail-closed page. */
+void          dns_chain_sync(DnsChain *c, int64_t *height, int64_t *peer_height);
 
 #endif /* DNS_CHAIN_H */
