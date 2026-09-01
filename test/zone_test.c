@@ -13,8 +13,8 @@
  *     key-ordered iteration (and therefore the gossip digest) depends on.
  *   • THE TWO REAL USER BUGS, now fixed and pinned as executable evidence of
  *     the fix (each keeps the explanation of what went wrong):
- *       - a record whose label already carries the TLD suffix ("gpt.pepe"
- *         inside the gpt zone) would fold to gpt.pepe.gpt.pepe — zone_build_rec
+ *       - a record whose label already carries the TLD suffix ("gpt.doge"
+ *         inside the gpt zone) would fold to gpt.doge.gpt.doge — zone_build_rec
  *         refuses it (the zone FILE parser deliberately still accepts it);
  *       - a CNAME whose target is an IP literal ("216.24.57.1"), which
  *         dns_encode_name happily turns into four dname labels — zone_build_rec
@@ -23,7 +23,7 @@
  *     boundaries (ZONE_MAX_RECS, ZONE_MAX_RDATA), plus the malformed-line paths.
  *
  * Fixtures live in a mkdtemp'd /tmp directory and are removed on exit. Nothing
- * touches ~/.pepenet and nothing opens a socket.
+ * touches ~/.dogenet and nothing opens a socket.
  */
 #include "zone.h"
 #include "dns_wire.h"
@@ -143,15 +143,15 @@ static void section_rdata(void) {
       CK(zone_build_rec("www", "AAAA", 60, "2001:db8::1", &r) == 0 && r.rdlen == 16 &&
          memcmp(r.rdata, want, 16) == 0, "AAAA builds 16 bytes"); }
 
-    CK(zone_build_rec("www", "CNAME", 60, "host.pepenet.pepe", &r) == 0 &&
+    CK(zone_build_rec("www", "CNAME", 60, "host.dogenet.doge", &r) == 0 &&
        r.rdlen == 19 && r.rdata[0] == 4 && memcmp(r.rdata + 1, "host", 4) == 0 &&
        r.rdata[18] == 0, "CNAME builds an uncompressed dname");
-    CK(zone_build_rec("@", "NS", 60, "ns1.pepe", &r) == 0 && r.type == DNS_NS &&
+    CK(zone_build_rec("@", "NS", 60, "ns1.doge", &r) == 0 && r.type == DNS_NS &&
        r.rdlen == 10 && r.label[0] == '\0', "NS builds a dname and \"@\" is the empty label");
-    CK(zone_build_rec("9.2.0.192.in-addr.arpa", "PTR", 60, "host.pepe", &r) == 0 &&
+    CK(zone_build_rec("9.2.0.192.in-addr.arpa", "PTR", 60, "host.doge", &r) == 0 &&
        r.type == DNS_PTR && r.rdlen == 11, "PTR builds a dname");
 
-    CK(zone_build_rec("@", "MX", 60, "10 mail.pepenet.pepe", &r) == 0 &&
+    CK(zone_build_rec("@", "MX", 60, "10 mail.dogenet.doge", &r) == 0 &&
        r.rdlen == 21 && r.rdata[0] == 0 && r.rdata[1] == 10 && r.rdata[2] == 4,
        "MX builds preference:be16 ‖ dname");
 
@@ -191,7 +191,7 @@ static void section_rdata(void) {
     CK(zone_build_rec("www", "A", 60, "192.0.2", &r) == -1, "a short IPv4 literal is rejected");
     CK(zone_build_rec("www", "AAAA", 60, "not-an-address", &r) == -1, "a bad IPv6 literal is rejected");
     CK(zone_build_rec("www", "AAAA", 60, "192.0.2.9", &r) == -1, "an IPv4 literal is rejected for AAAA");
-    CK(zone_build_rec("www", "MX", 60, "mail.pepe", &r) == -1, "MX without a preference is rejected");
+    CK(zone_build_rec("www", "MX", 60, "mail.doge", &r) == -1, "MX without a preference is rejected");
     CK(zone_build_rec("www", "TLSA", 60, "3 1", &r) == -1, "a short TLSA is rejected");
     CK(zone_build_rec("www", "TLSA", 60, "3 1 1 zz", &r) == -1, "non-hex TLSA association data is rejected");
     CK(zone_build_rec("www", "TLSA", 60, "3 1 1 abc", &r) == -1, "odd-length TLSA hex is rejected");
@@ -226,11 +226,11 @@ static const char ZBODY[] =
     "@        A     300 10.0.0.1\n"
     "www      A     300 10.0.0.2\n"
     "www      AAAA  300 2001:db8::2\n"
-    "alias    CNAME 300 www.pepenet.pepe\n"
-    "@        NS    300 ns1.pepenet.pepe\n"
-    "@        MX    300 10 mail.pepenet.pepe\n"
+    "alias    CNAME 300 www.dogenet.doge\n"
+    "@        NS    300 ns1.dogenet.doge\n"
+    "@        MX    300 10 mail.dogenet.doge\n"
     "@        TXT   300 \"v=spf1 -all\"\n"
-    "sub      PTR   300 host.pepenet.pepe\n"
+    "sub      PTR   300 host.dogenet.doge\n"
     "_443._tcp TLSA 300 3 1 1 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
     "@        SSHFP 300 4 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
     "@        OPENPGPKEY 300 cafebabe\n"
@@ -239,10 +239,10 @@ static const char ZBODY[] =
 static void section_roundtrip(void) {
     static zone z1, z2;
     const char *p = write_zone("rt.zone", ZBODY);
-    CK(zone_load(&z1, p, "pepenet") == 0, "the fixture zone file loads");
+    CK(zone_load(&z1, p, "dogenet") == 0, "the fixture zone file loads");
     CK(z1.n == 12, "every record line became a record");
     CK(z1.serial == 42, "the serial directive is parsed");
-    CK(strcmp(z1.apex, "pepenet") == 0, "the apex is stamped onto the zone");
+    CK(strcmp(z1.apex, "dogenet") == 0, "the apex is stamped onto the zone");
     CK(z1.recs[0].label[0] == '\0', "\"@\" became the empty (apex) label");
 
     /* serialize every parsed record back to zone-file text */
@@ -259,7 +259,7 @@ static void section_roundtrip(void) {
     fclose(f);
     CK(ser_ok, "every parsed record serializes back to text");
 
-    CK(zone_load(&z2, p2, "pepenet") == 0, "the re-serialized zone file re-loads");
+    CK(zone_load(&z2, p2, "dogenet") == 0, "the re-serialized zone file re-loads");
     CK(z2.n == z1.n && z2.serial == z1.serial, "the reload has the same shape");
     int same = (z1.n == z2.n);
     int firstbad = -1;
@@ -273,8 +273,8 @@ static void section_roundtrip(void) {
     int inv = 1;
     static const struct { uint16_t t; const char *rd; } T[] = {
         { DNS_A, "10.0.0.1" }, { DNS_AAAA, "2001:db8::1" },
-        { DNS_CNAME, "a.pepe" }, { DNS_NS, "a.pepe" }, { DNS_PTR, "a.pepe" },
-        { DNS_MX, "10 a.pepe" }, { DNS_TXT, "hi" },
+        { DNS_CNAME, "a.doge" }, { DNS_NS, "a.doge" }, { DNS_PTR, "a.doge" },
+        { DNS_MX, "10 a.doge" }, { DNS_TXT, "hi" },
         { DNS_SSHFP, "1 1 aabb" }, { DNS_TLSA, "3 1 1 aabb" },
         { DNS_OPENPGPKEY, "00" }, { 99, "00" }, { 65535, "00" },
     };
@@ -288,10 +288,10 @@ static void section_roundtrip(void) {
     /* SRV is in dns_wire.h and in type_code, but has no rdata builder: it falls
        through to the generic hex path, so "1 0 443 host" cannot be expressed. */
     { zone_rec r;
-      CK(zone_build_rec("_sip._tcp", "SRV", 60, "1 0 5060 sip.pepe", &r) == -1 &&
+      CK(zone_build_rec("_sip._tcp", "SRV", 60, "1 0 5060 sip.doge", &r) == -1 &&
          zone_build_rec("_sip._tcp", "SRV", 60, "0001000013c4", &r) == 0,
          "(note) SRV has no rdata builder — only the raw-hex form is accepted");
-      CK(zone_build_rec("@", "SOA", 60, "ns1.pepe root.pepe 1 2 3 4 5", &r) == -1,
+      CK(zone_build_rec("@", "SOA", 60, "ns1.doge root.doge 1 2 3 4 5", &r) == -1,
          "(note) SOA is not a supported zone-file type (README: no SOA at the apex yet)"); }
 }
 
@@ -365,26 +365,26 @@ static void section_key(void) {
 /* ═══════════ 4. the two real user bugs ═════════════════════════════════ */
 static void section_tld_fold(void) {
     zone_rec r;
-    /* The reported case: an "A" record entered with host "gpt.pepe" while
-     * publishing the gpt zone under the .pepe TLD. A label is relative to its
+    /* The reported case: an "A" record entered with host "gpt.doge" while
+     * publishing the gpt zone under the .doge TLD. A label is relative to its
      * apex by construction, so dnsd_core would answer this record only at
-     * <label>.<apex>.<tld> = gpt.pepe.gpt.pepe — never the name the user meant.
+     * <label>.<apex>.<tld> = gpt.doge.gpt.doge — never the name the user meant.
      * zone.c (label_carries_tld) now refuses the label outright, and refuses it
      * case-blind, since DNS labels are case-insensitive. */
-    int rc = zone_build_rec("gpt.pepe", "A", 300, "216.24.57.1", &r);
-    printf("       zone_build_rec(label=\"gpt.pepe\") -> rc=%d\n", rc);
-    CK(rc == -1 && zone_build_rec("GPT.PePe", "A", 300, "216.24.57.1", &r) == -1,
+    int rc = zone_build_rec("gpt.doge", "A", 300, "216.24.57.1", &r);
+    printf("       zone_build_rec(label=\"gpt.doge\") -> rc=%d\n", rc);
+    CK(rc == -1 && zone_build_rec("GPT.DoGe", "A", 300, "216.24.57.1", &r) == -1,
        "(evidence) the TLD-bearing label is refused, not stored verbatim — in any case");
     { char fqdn[200];
-      snprintf(fqdn, sizeof fqdn, "%s.%s.%s", "gpt.pepe", "gpt", "pepe");
-      CK(strcmp(fqdn, "gpt.pepe.gpt.pepe") == 0,
-         "(evidence) ... because accepted it could only ever answer at gpt.pepe.gpt.pepe"); }
-    CK(zone_build_rec("gpt.pepe", "A", 300, "216.24.57.1", &r) == -1,
+      snprintf(fqdn, sizeof fqdn, "%s.%s.%s", "gpt.doge", "gpt", "doge");
+      CK(strcmp(fqdn, "gpt.doge.gpt.doge") == 0,
+         "(evidence) ... because accepted it could only ever answer at gpt.doge.gpt.doge"); }
+    CK(zone_build_rec("gpt.doge", "A", 300, "216.24.57.1", &r) == -1,
        "a label that already carries the TLD suffix is rejected");
-    CK(zone_build_rec("www.pepenet.pepe", "A", 300, "10.0.0.1", &r) == -1,
+    CK(zone_build_rec("www.dogenet.doge", "A", 300, "10.0.0.1", &r) == -1,
        "a label that repeats <apex>.<tld> is rejected");
     /* the check is on the TLD suffix only — an ordinary sub-label is untouched */
-    CK(zone_build_rec("pepe", "A", 300, "10.0.0.1", &r) == 0 &&
+    CK(zone_build_rec("doge", "A", 300, "10.0.0.1", &r) == 0 &&
        zone_build_rec("www.gpt", "A", 300, "10.0.0.1", &r) == 0,
        "a label that merely contains, but does not end in, the TLD still builds");
 
@@ -393,13 +393,13 @@ static void section_tld_fold(void) {
      * express the literal label. The strictness lives on the programmatic front
      * door (zone_build_rec), which is what the CLI and the mesh publish path use. */
     static zone z;
-    const char *p = write_zone("fold.zone", "gpt.pepe A 300 216.24.57.1\n");
-    CK(zone_load(&z, p, "gpt") == 0 && z.n == 1 && strcmp(z.recs[0].label, "gpt.pepe") == 0,
+    const char *p = write_zone("fold.zone", "gpt.doge A 300 216.24.57.1\n");
+    CK(zone_load(&z, p, "gpt") == 0 && z.n == 1 && strcmp(z.recs[0].label, "gpt.doge") == 0,
        "(evidence) the zone FILE parser accepts it — deliberately, unlike zone_build_rec");
 
     /* the same label in the key: it is opaque bytes, so the store cannot help */
     uint8_t k[SP_STATE_KEY_MAX];
-    CK(dns_key_pack("gpt.pepe", DNS_A, k, sizeof k) == 10,
+    CK(dns_key_pack("gpt.doge", DNS_A, k, sizeof k) == 10,
        "(evidence) the folded label packs into the store key unchanged");
 }
 
@@ -420,12 +420,12 @@ static void section_cname_ip(void) {
       CK(dname_text(r.rdata, r.rdlen, t, sizeof t) == 13 && strcmp(t, "216.24.57.1") == 0,
          "(evidence) the refused rdata would have been a CNAME to \"216.24.57.1.\""); }
     /* and the consequence that justifies the refusal: the target carries no TLD,
-     * so pepenet-tls' in-zone CNAME chase (origin.c inzone_label) could never
+     * so dogenet-tls' in-zone CNAME chase (origin.c inzone_label) could never
      * resolve it — the record would have been a permanent dead end. */
     { char t[128]; dname_text(r.rdata, r.rdlen, t, sizeof t);
       size_t tl = strlen(t);
-      CK(!(tl > 5 && strcmp(t + tl - 5, ".pepe") == 0),
-         "(evidence) the target is in no pepenet zone -> the chase would dead-end"); }
+      CK(!(tl > 5 && strcmp(t + tl - 5, ".doge") == 0),
+         "(evidence) the target is in no dogenet zone -> the chase would dead-end"); }
 
     /* An IPv4/IPv6 literal is never a legal CNAME target (RFC 1034 §3.6.2
      * requires a domain name), on any of the types that take the dname path. */
@@ -446,7 +446,7 @@ static void section_duplicates(void) {
     const char *p = write_zone("dup.zone",
         "www A 300 10.0.0.1\n"
         "www A 300 10.0.0.1\n");     /* byte-identical duplicate */
-    CK(zone_load(&z, p, "pepenet") == 0, "a zone with a duplicate record loads");
+    CK(zone_load(&z, p, "dogenet") == 0, "a zone with a duplicate record loads");
     printf("       duplicate (www,A,10.0.0.1) x2 -> z.n = %d\n", z.n);
     /* FAILS: RFC 2181 §5 forbids duplicate RRs inside an RRset; zone.c keeps
      * both, so the responder emits the same answer twice. */
@@ -462,7 +462,7 @@ static void section_duplicates(void) {
 
     /* a legitimate multi-record RRset must of course survive intact */
     p = write_zone("rrset.zone", "www A 300 10.0.0.1\nwww A 300 10.0.0.2\n");
-    CK(zone_load(&z, p, "pepenet") == 0 && z.n == 2 &&
+    CK(zone_load(&z, p, "dogenet") == 0 && z.n == 2 &&
        z.recs[0].rdata[3] == 1 && z.recs[1].rdata[3] == 2,
        "a legitimate two-address RRset keeps both records");
     /* ... and both collide on one store key, so only one can ever be held */
@@ -470,8 +470,8 @@ static void section_duplicates(void) {
        "(evidence) an A RRset cannot survive the (label,type) store key — LWW keeps one");
 
     /* CNAME + other data at the same label is illegal (RFC 1034 §3.6.2) */
-    p = write_zone("cnamedup.zone", "www CNAME 300 a.pepe\nwww A 300 10.0.0.1\n");
-    int rc = zone_load(&z, p, "pepenet");
+    p = write_zone("cnamedup.zone", "www CNAME 300 a.doge\nwww A 300 10.0.0.1\n");
+    int rc = zone_load(&z, p, "dogenet");
     printf("       CNAME coexisting with A at the same label -> rc=%d n=%d\n", rc, z.n);
     /* FAILS: RFC 1034 §3.6.2 — if a CNAME is present at a node no other data
      * may be. zone.c performs no cross-record validation. */
@@ -481,14 +481,14 @@ static void section_duplicates(void) {
 static void section_empty_and_budget(void) {
     static zone z;
     const char *p = write_zone("empty.zone", "# nothing here\n;   nor here\n\n\n");
-    CK(zone_load(&z, p, "pepenet") == 0 && z.n == 0,
+    CK(zone_load(&z, p, "dogenet") == 0 && z.n == 0,
        "a comments-only zone loads as an empty zone");
-    CK(strcmp(z.apex, "pepenet") == 0 && z.serial == 0,
+    CK(strcmp(z.apex, "dogenet") == 0 && z.serial == 0,
        "an empty zone still carries its apex and a zero serial");
 
     p = write_zone("zero.zone", "");
-    CK(zone_load(&z, p, "pepenet") == 0 && z.n == 0, "a zero-byte zone file loads empty");
-    CK(zone_load(&z, fx("does-not-exist.zone"), "pepenet") == -1,
+    CK(zone_load(&z, p, "dogenet") == 0 && z.n == 0, "a zero-byte zone file loads empty");
+    CK(zone_load(&z, fx("does-not-exist.zone"), "dogenet") == -1,
        "a missing zone file is an error");
 
     /* record-count boundary: exactly ZONE_MAX_RECS, then one more */
@@ -497,12 +497,12 @@ static void section_empty_and_budget(void) {
           o += (size_t)sprintf(body + o, "h%d A 60 10.0.0.1\n", i);
       body[o] = '\0';
       p = write_zone("full.zone", body);
-      CK(zone_load(&z, p, "pepenet") == 0 && z.n == ZONE_MAX_RECS,
+      CK(zone_load(&z, p, "dogenet") == 0 && z.n == ZONE_MAX_RECS,
          "a zone with exactly ZONE_MAX_RECS (512) records loads");
       o += (size_t)sprintf(body + o, "over A 60 10.0.0.1\n");
       body[o] = '\0';
       p = write_zone("over.zone", body);
-      CK(zone_load(&z, p, "pepenet") == -1, "ZONE_MAX_RECS + 1 records is refused");
+      CK(zone_load(&z, p, "dogenet") == -1, "ZONE_MAX_RECS + 1 records is refused");
       free(body); }
 
     /* rdata-byte boundary via the generic hex path (ZONE_MAX_RDATA = 512) */
@@ -510,14 +510,14 @@ static void section_empty_and_budget(void) {
       for (int i = 0; i < 511; i++) strcat(body, "ab");
       strcat(body, "\n");
       p = write_zone("rdmax.zone", body);
-      CK(zone_load(&z, p, "pepenet") == 0 && z.n == 1 && z.recs[0].rdlen == 511,
+      CK(zone_load(&z, p, "dogenet") == 0 && z.n == 1 && z.recs[0].rdlen == 511,
          "(note) the generic hex path tops out at 511 bytes (char hex[1024] + \"%1023s\")");
       free(body); }
     { char *body = malloc(2400); strcpy(body, "@ TYPE99 60 ");
       for (int i = 0; i < ZONE_MAX_RDATA; i++) strcat(body, "ab");
       strcat(body, "\n");
       p = write_zone("rdmax2.zone", body);
-      CK(zone_load(&z, p, "pepenet") == -1,
+      CK(zone_load(&z, p, "dogenet") == -1,
          "(note) rdata of exactly ZONE_MAX_RDATA fails closed on the generic path");
       free(body); }
     { char t[1100]; strcpy(t, "3 1 1 ");
@@ -529,7 +529,7 @@ static void section_empty_and_budget(void) {
       for (int i = 0; i < 600; i++) strcat(body, "ab");   /* hex[1024] caps at 511 bytes */
       strcat(body, "\n");
       p = write_zone("rdover.zone", body);
-      CK(zone_load(&z, p, "pepenet") == -1, "rdata past ZONE_MAX_RDATA is refused");
+      CK(zone_load(&z, p, "dogenet") == -1, "rdata past ZONE_MAX_RDATA is refused");
       free(body); }
 
     /* the store budget is the real ceiling: DNS_BUDGET / a signed op is far
@@ -544,29 +544,29 @@ static void section_malformed(void) {
     const char *p;
 
     p = write_zone("m1.zone", "www\n");
-    CK(zone_load(&z, p, "pepenet") == -1, "a record line with only a label is refused");
+    CK(zone_load(&z, p, "dogenet") == -1, "a record line with only a label is refused");
     p = write_zone("m2.zone", "www A\n");
-    CK(zone_load(&z, p, "pepenet") == -1, "a record line with no ttl is refused");
+    CK(zone_load(&z, p, "dogenet") == -1, "a record line with no ttl is refused");
     p = write_zone("m3.zone", "www NOSUCH 60 x\n");
-    CK(zone_load(&z, p, "pepenet") == -1, "an unknown type in a zone file is refused");
+    CK(zone_load(&z, p, "dogenet") == -1, "an unknown type in a zone file is refused");
     p = write_zone("m4.zone", "www A 60 not-an-ip\n");
-    CK(zone_load(&z, p, "pepenet") == -1, "bad rdata in a zone file is refused");
+    CK(zone_load(&z, p, "dogenet") == -1, "bad rdata in a zone file is refused");
     p = write_zone("m5.zone", "www A abc 10.0.0.1\n");
-    CK(zone_load(&z, p, "pepenet") == -1, "a non-numeric ttl is refused");
+    CK(zone_load(&z, p, "dogenet") == -1, "a non-numeric ttl is refused");
 
     /* A record line with NO rdata at all. build_rdata's per-type scanf leaves
      * its token buffer untouched when there is nothing to scan, so the A path
      * runs inet_pton over uninitialised stack. It happens to fail — but the
      * read is real. The generic hex path is worse (see below). */
     p = write_zone("m6.zone", "www A 60\n");
-    CK(zone_load(&z, p, "pepenet") == -1, "an A record with no rdata is refused");
+    CK(zone_load(&z, p, "dogenet") == -1, "an A record with no rdata is refused");
 
     /* FAILS: on the generic/TYPEnnn path the same missing-rdata line runs
      * hexdecode() over an UNINITIALISED char hex[1024] — it scans until it
      * happens to see a NUL or a space, which may be past the end of the
      * buffer, and whatever it decodes becomes the record's rdata. */
     p = write_zone("m7.zone", "www TYPE99 60\n");
-    { int rc = zone_load(&z, p, "pepenet");
+    { int rc = zone_load(&z, p, "dogenet");
       printf("       \"www TYPE99 60\" (no rdata) -> rc=%d n=%d rdlen=%u\n",
              rc, z.n, rc == 0 && z.n ? z.recs[0].rdlen : 0);
       CK(rc == -1, "a generic-type record with no rdata is refused"); }
@@ -582,7 +582,7 @@ static void section_malformed(void) {
       o += (size_t)sprintf(body + o, "\nb TYPE99 60\n");
       body[o] = '\0';
       p = write_zone("m7b.zone", body);
-      int rc = zone_load(&z, p, "pepenet");
+      int rc = zone_load(&z, p, "dogenet");
       if (rc == 0 && z.n == 2)
           printf("       leak probe: rec[0] rdlen=%u %02x%02x  rec[1] rdlen=%u %02x%02x"
                  "  (rec[1] had NO rdata in the file)\n",
@@ -607,14 +607,14 @@ static void section_malformed(void) {
     { char body[256]; memset(body, 'q', 100); body[100] = '\0';
       char line[300]; snprintf(line, sizeof line, "%s A 60 10.0.0.1\n", body);
       p = write_zone("m8.zone", line);
-      CK(zone_load(&z, p, "pepenet") == -1, "an over-long label in a zone file is refused"); }
+      CK(zone_load(&z, p, "dogenet") == -1, "an over-long label in a zone file is refused"); }
 
     /* a line longer than the 2048-byte fgets buffer splits and the tail is
      * re-parsed as a record — a long COMMENT should not become an error */
     { char *body = malloc(4096); body[0] = '#';
       memset(body + 1, 'c', 3000); strcpy(body + 3001, "\n");
       p = write_zone("m9.zone", body);
-      int rc = zone_load(&z, p, "pepenet");
+      int rc = zone_load(&z, p, "dogenet");
       printf("       a 3000-byte comment line -> rc=%d\n", rc);
       /* FAILS: zone_load reads with fgets(line, 2048) and treats each chunk as
        * a fresh line, so any line over 2047 bytes has its tail mis-parsed. */

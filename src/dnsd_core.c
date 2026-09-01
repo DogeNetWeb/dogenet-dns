@@ -2,7 +2,7 @@
  * dnsd.c's main-thread half, with the file-scope globals folded into DnsdCore. */
 #include "dnsd_core.h"
 #include "dns_wire.h"
-#include "pepenet/crypto.h"
+#include "dogenet/crypto.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -72,7 +72,7 @@ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
     char apex[64], sub[192];
     split_apex(left, apex, sizeof apex, sub, sizeof sub);
 
-    /* Apex must be a §3.1 pepenet name (DNS label). Subdomain labels are free
+    /* Apex must be a §3.1 dogenet name (DNS label). Subdomain labels are free
      * form (e.g. _443._tcp) and are matched later against the zone. */
     if (!sp_name_valid(apex, strlen(apex))) {
         resp_start(&r, out, cap, limit, q, DNS_RCODE_NXDOMAIN); goto done;

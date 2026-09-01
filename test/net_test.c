@@ -54,9 +54,9 @@
 #include "dns_state.h"
 #include "dns_net.h"
 #include "zone.h"
-#include "pepenet/crypto.h"
-#include "pepenet/state.h"
-#include "pepenet/wire.h"
+#include "dogenet/crypto.h"
+#include "dogenet/state.h"
+#include "dogenet/wire.h"
 
 #include <stdio.h>
 #include <stdlib.h>

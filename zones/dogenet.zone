@@ -1,16 +1,16 @@
-# Zone for the flat pepenet name `pepenet` (served as *.pepenet.pepe).
+# Zone for the flat dogenet name `dogenet` (served as *.dogenet.doge).
 # Format:  <label>  <TYPE>  <ttl>  <rdata...>
 #   label "@" is the apex; anything else is a subdomain within this zone.
-# All hierarchy lives here under the single on-chain owner of `pepenet`.
+# All hierarchy lives here under the single on-chain owner of `dogenet`.
 serial 1
 
 @      A      3600   192.0.2.1
 @      AAAA   3600   2001:db8::1
-@      TXT    3600   "pepenet dns — hello from the namespace"
+@      TXT    3600   "dogenet dns — hello from the namespace"
 www    A      3600   192.0.2.2
 www    AAAA   3600   2001:db8::2
-api    CNAME  3600   www.pepenet.pepe
-@      MX     3600   10 mail.pepenet.pepe
+api    CNAME  3600   www.dogenet.doge
+@      MX     3600   10 mail.dogenet.doge
 mail   A      3600   192.0.2.3
 
 # DANE / authenticated-key directory (the actually-novel capability):

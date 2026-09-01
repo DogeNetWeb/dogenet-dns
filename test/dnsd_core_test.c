@@ -9,7 +9,7 @@
  *     A query on a CNAME-only label falls back to the CNAME.
  *   • NEGATIVE ANSWERS, and WHICH one: NXDOMAIN for an unknown label, for an
  *     apex this server does not host, and for an apex that is not a valid §3.1
- *     pepenet name; REFUSED for a name outside the server's TLD and for a class
+ *     dogenet name; REFUSED for a name outside the server's TLD and for a class
  *     other than IN; NOERROR with zero answers (NODATA) for a known label with
  *     no record of the asked type.
  *   • NEVER A WRONG ANSWER: across a matrix of names x types, every answer RR
@@ -25,7 +25,7 @@
  *     them all. Answers never exceed the negotiated budget.
  *   • THE ACCEPTANCE TEST — the --tls-redirect DANE policy, including the exact
  *     documented case of a subdomain that has an A record but NO _443._tcp
- *     TLSA (README: "Names without a _443._tcp TLSA are untouched"; pepenet-tls
+ *     TLSA (README: "Names without a _443._tcp TLSA are untouched"; dogenet-tls
  *     origin.h: "No TLSA => the origin cannot be DANE-authenticated, so it is
  *     NOT servable ... never fall back to an unverified connection" — so the
  *     resolver must NOT steer such a name at the proxy).
@@ -40,7 +40,7 @@
 #include "dns_state.h"
 #include "dns_wire.h"
 #include "zone.h"
-#include "pepenet/crypto.h"
+#include "dogenet/crypto.h"
 
 #include <ctype.h>
 #include <strings.h>
@@ -62,12 +62,12 @@ static uint64_t sm64(void) {
 }
 static uint32_t rnd(uint32_t n) { return n ? (uint32_t)(sm64() % n) : 0u; }
 
-/* ── fake chain: owns "pepenet" and "gpt", nothing else ──────────────────── */
+/* ── fake chain: owns "dogenet" and "gpt", nothing else ──────────────────── */
 static uint32_t g_tip = 500;
 static uint8_t  g_owner160[20];
 static int fk_owner(void *u, const char *name, uint8_t owner[20]) {
     (void)u;
-    if (strcmp(name, "pepenet") != 0 && strcmp(name, "gpt") != 0) return 0;
+    if (strcmp(name, "dogenet") != 0 && strcmp(name, "gpt") != 0) return 0;
     memcpy(owner, g_owner160, 20);
     return 1;
 }
@@ -250,14 +250,14 @@ static const char HEX32[] = "0123456789abcdef0123456789abcdef"
 static void publish(SpState *st) {
     int bad = 0;
     struct { const char *zone, *label, *type, *text; } R[] = {
-        { "pepenet", "@",              "A",     "10.0.0.1" },
-        { "pepenet", "www",            "A",     "10.0.0.2" },
-        { "pepenet", "www",            "AAAA",  "2001:db8::2" },
-        { "pepenet", "plain",          "A",     "10.0.0.9" },   /* A, NO TLSA */
-        { "pepenet", "alias",          "CNAME", "www.pepenet.pepe" },
-        { "pepenet", "txt",            "TXT",   "\"hello world\"" },
-        { "pepenet", "_443._tcp",      "TLSA",  NULL },
-        { "pepenet", "_443._tcp.www",  "TLSA",  NULL },
+        { "dogenet", "@",              "A",     "10.0.0.1" },
+        { "dogenet", "www",            "A",     "10.0.0.2" },
+        { "dogenet", "www",            "AAAA",  "2001:db8::2" },
+        { "dogenet", "plain",          "A",     "10.0.0.9" },   /* A, NO TLSA */
+        { "dogenet", "alias",          "CNAME", "www.dogenet.doge" },
+        { "dogenet", "txt",            "TXT",   "\"hello world\"" },
+        { "dogenet", "_443._tcp",      "TLSA",  NULL },
+        { "dogenet", "_443._tcp.www",  "TLSA",  NULL },
         { "gpt",     "@",              "A",     "10.1.1.1" },
     };
     char tlsa[128]; snprintf(tlsa, sizeof tlsa, "3 1 1 %s", HEX32);
@@ -269,12 +269,12 @@ static void publish(SpState *st) {
     }
     /* a fat label, for the UDP-budget / TC proof */
     { char big[600]; big[0] = '"'; memset(big + 1, 'x', 250); strcpy(big + 251, "\"");
-      if (put(st, "pepenet", "big", "TXT", 300, big) != 1) bad++; }
+      if (put(st, "dogenet", "big", "TXT", 300, big) != 1) bad++; }
     { char hex[1100]; for (int i = 0; i < 400; i++) memcpy(hex + 2 * i, "ab", 2);
       hex[800] = '\0';
-      if (put(st, "pepenet", "big", "OPENPGPKEY", 300, hex) != 1) bad++; }
-    if (put(st, "pepenet", "big", "A", 300, "10.0.0.7") != 1) bad++;
-    if (put(st, "pepenet", "big", "AAAA", 300, "2001:db8::7") != 1) bad++;
+      if (put(st, "dogenet", "big", "OPENPGPKEY", 300, hex) != 1) bad++; }
+    if (put(st, "dogenet", "big", "A", 300, "10.0.0.7") != 1) bad++;
+    if (put(st, "dogenet", "big", "AAAA", 300, "2001:db8::7") != 1) bad++;
     CK(bad == 0, "every fixture record publishes into the store");
 
     /* The two zone-level user bugs, as store rows. zone_build_rec now refuses
@@ -283,7 +283,7 @@ static void publish(SpState *st) {
      * what dnsd_core does when it meets them. */
     int raw = 0;
     { uint8_t ip[4] = { 216, 24, 57, 1 };                       /* the fold bug */
-      if (put_raw(st, "gpt", "gpt.pepe", DNS_A, 300, ip, 4) != 1) raw++; }
+      if (put_raw(st, "gpt", "gpt.doge", DNS_A, 300, ip, 4) != 1) raw++; }
     { uint8_t nm[64];                                           /* the literal bug */
       int n = dns_encode_name(nm, sizeof nm, "216.24.57.1");
       if (n != 13 || put_raw(st, "gpt", "bad", DNS_CNAME, 300, nm, (uint16_t)n) != 1) raw++; }
@@ -293,48 +293,48 @@ static void publish(SpState *st) {
 /* ═══════════ resolution ════════════════════════════════════════════════ */
 static void section_resolve(void) {
     resp r;
-    CK(ask("www.pepenet.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.valid &&
+    CK(ask("www.dogenet.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.valid &&
        r.na == 1 && r.a[0].type == DNS_A && r.a[0].cls == DNS_CLASS_IN &&
        r.a[0].rdlen == 4 && memcmp(r.a[0].rd, "\x0a\x00\x00\x02", 4) == 0 &&
-       strcmp(r.a[0].owner, "www.pepenet.pepe") == 0 && r.a[0].ttl == 300,
+       strcmp(r.a[0].owner, "www.dogenet.doge") == 0 && r.a[0].ttl == 300,
        "a known subdomain resolves with the exact published rdata");
 
-    CK(ask("pepenet.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("dogenet.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        memcmp(r.a[0].rd, "\x0a\x00\x00\x01", 4) == 0,
        "the apex resolves (empty label)");
 
-    CK(ask("www.pepenet.pepe", DNS_AAAA, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("www.dogenet.doge", DNS_AAAA, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        r.a[0].type == DNS_AAAA && r.a[0].rdlen == 16 && r.a[0].rd[0] == 0x20,
        "AAAA resolves with 16 bytes of rdata");
 
-    CK(ask("txt.pepenet.pepe", DNS_TXT, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("txt.dogenet.doge", DNS_TXT, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        r.a[0].rdlen == 12 && r.a[0].rd[0] == 11 &&
        memcmp(r.a[0].rd + 1, "hello world", 11) == 0, "TXT resolves");
 
-    CK(ask("_443._tcp.www.pepenet.pepe", DNS_TLSA, &r) == DNS_RCODE_NOERROR &&
+    CK(ask("_443._tcp.www.dogenet.doge", DNS_TLSA, &r) == DNS_RCODE_NOERROR &&
        r.na == 1 && r.a[0].type == DNS_TLSA && r.a[0].rdlen == 35 &&
        r.a[0].rd[0] == 3 && r.a[0].rd[1] == 1 && r.a[0].rd[2] == 1,
        "a DANE TLSA at _443._tcp.<sub> resolves");
 
-    CK(ask("www.pepenet.pepe", 255, &r) == DNS_RCODE_NOERROR && r.na == 2,
+    CK(ask("www.dogenet.doge", 255, &r) == DNS_RCODE_NOERROR && r.na == 2,
        "ANY returns every record at the label");
 
-    CK(ask("alias.pepenet.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("alias.dogenet.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        r.a[0].type == DNS_CNAME, "an A query on a CNAME-only label returns the CNAME");
-    CK(ask("alias.pepenet.pepe", DNS_CNAME, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("alias.dogenet.doge", DNS_CNAME, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        r.a[0].type == DNS_CNAME, "a CNAME query returns the CNAME once, not twice");
 }
 
 /* ═══════════ case insensitivity ════════════════════════════════════════ */
 static void section_case(void) {
     resp lo, hi;
-    ask("www.pepenet.pepe", DNS_A, &lo);
-    CK(ask("WWW.PEPENET.PEPE", DNS_A, &hi) == DNS_RCODE_NOERROR && hi.na == lo.na &&
+    ask("www.dogenet.doge", DNS_A, &lo);
+    CK(ask("WWW.DOGENET.DOGE", DNS_A, &hi) == DNS_RCODE_NOERROR && hi.na == lo.na &&
        hi.na == 1 && memcmp(hi.a[0].rd, lo.a[0].rd, 4) == 0,
        "an all-uppercase query resolves identically");
-    CK(ask("wWw.PePeNeT.pEpE", DNS_A, &hi) == DNS_RCODE_NOERROR && hi.na == 1,
+    CK(ask("wWw.DoGeNeT.dOgE", DNS_A, &hi) == DNS_RCODE_NOERROR && hi.na == 1,
        "mixed case in label, apex and TLD all match");
-    CK(ask("_443._TCP.WwW.pepenet.pepe", DNS_TLSA, &hi) == DNS_RCODE_NOERROR &&
+    CK(ask("_443._TCP.WwW.dogenet.doge", DNS_TLSA, &hi) == DNS_RCODE_NOERROR &&
        hi.na == 1, "a mixed-case multi-label subdomain matches");
 
     /* dns_parse_query keeps the request's own octets in qname_orig (qname stays
@@ -343,56 +343,56 @@ static void section_case(void) {
      * §4.1.2 requires the question to be copied from the query; a client using
      * DNS-0x20 case randomisation (the standard off-path spoofing defence)
      * discards any answer that folds it. */
-    ask_ex("WwW.PePeNeT.PePe", DNS_A, DNS_CLASS_IN, 0, 0, 0, 0x1234, &hi);
-    printf("       request qname 'WwW.PePeNeT.PePe' -> response question '%s'\n", hi.qname);
+    ask_ex("WwW.DoGeNeT.DoGe", DNS_A, DNS_CLASS_IN, 0, 0, 0, 0x1234, &hi);
+    printf("       request qname 'WwW.DoGeNeT.DoGe' -> response question '%s'\n", hi.qname);
     CK(qsec_echoed(&hi), "[RFC 1035 4.1.2] a mixed-case question is echoed byte-for-byte");
 }
 
 /* ═══════════ negative answers ══════════════════════════════════════════ */
 static void section_negative(void) {
     resp r;
-    CK(ask("nope.pepenet.pepe", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
+    CK(ask("nope.dogenet.doge", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
        "an unknown label in a hosted zone is NXDOMAIN with no answers");
-    CK(ask("a.b.c.pepenet.pepe", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
+    CK(ask("a.b.c.dogenet.doge", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
        "a deep unknown subdomain is NXDOMAIN");
-    CK(ask("nobody.pepe", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
+    CK(ask("nobody.doge", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
        "an apex this server does not host is NXDOMAIN, not REFUSED");
-    CK(ask("www.nobody.pepe", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
+    CK(ask("www.nobody.doge", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
        "a subdomain of an unhosted apex is NXDOMAIN");
 
-    CK(ask("www.pepenet.pepe", DNS_MX, &r) == DNS_RCODE_NOERROR && r.na == 0,
+    CK(ask("www.dogenet.doge", DNS_MX, &r) == DNS_RCODE_NOERROR && r.na == 0,
        "a known label with no record of that type is NODATA (NOERROR, 0 answers)");
-    CK(ask("www.pepenet.pepe", DNS_TLSA, &r) == DNS_RCODE_NOERROR && r.na == 0,
+    CK(ask("www.dogenet.doge", DNS_TLSA, &r) == DNS_RCODE_NOERROR && r.na == 0,
        "a known label with no TLSA is NODATA, never a wrong record");
 
     CK(ask("example.com", DNS_A, &r) == DNS_RCODE_REFUSED && r.na == 0,
        "a name outside the server's TLD is REFUSED");
-    CK(ask("pepe", DNS_A, &r) == DNS_RCODE_REFUSED && r.na == 0,
+    CK(ask("doge", DNS_A, &r) == DNS_RCODE_REFUSED && r.na == 0,
        "the bare TLD is REFUSED");
     CK(ask("", DNS_A, &r) == DNS_RCODE_REFUSED && r.na == 0,
        "the root name is REFUSED");
-    CK(ask("notpepe", DNS_A, &r) == DNS_RCODE_REFUSED && r.na == 0,
+    CK(ask("notdoge", DNS_A, &r) == DNS_RCODE_REFUSED && r.na == 0,
        "a name that merely ends in the TLD's letters is REFUSED");
-    CK(ask("xpepe", DNS_A, &r) == DNS_RCODE_REFUSED && r.na == 0,
+    CK(ask("xdoge", DNS_A, &r) == DNS_RCODE_REFUSED && r.na == 0,
        "a suffix match must be on a label boundary");
 
-    /* apexes that are not valid §3.1 pepenet names */
-    CK(ask("ab--cd.pepe", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
+    /* apexes that are not valid §3.1 dogenet names */
+    CK(ask("ab--cd.doge", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
        "an ACE-prefixed apex (-- at 3-4) is NXDOMAIN");
-    CK(ask("-lead.pepe", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
+    CK(ask("-lead.doge", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
        "an apex with a leading hyphen is NXDOMAIN");
-    CK(ask("under_score.pepe", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
+    CK(ask("under_score.doge", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
        "an apex outside [a-z0-9-] is NXDOMAIN");
-    { char n[80]; memset(n, 'a', 33); strcpy(n + 33, ".pepe");
+    { char n[80]; memset(n, 'a', 33); strcpy(n + 33, ".doge");
       CK(ask(n, DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
          "a 33-byte apex (over SP_NAME_MAX) is NXDOMAIN"); }
 
     /* class */
-    CK(ask_ex("www.pepenet.pepe", DNS_A, 3 /* CH */, 0, 0, 0, 1, &r) == DNS_RCODE_REFUSED &&
+    CK(ask_ex("www.dogenet.doge", DNS_A, 3 /* CH */, 0, 0, 0, 1, &r) == DNS_RCODE_REFUSED &&
        r.na == 0, "a CHAOS-class query is REFUSED with no answers");
-    CK(ask_ex("www.pepenet.pepe", DNS_A, 255 /* ANY class */, 0, 0, 0, 1, &r) ==
+    CK(ask_ex("www.dogenet.doge", DNS_A, 255 /* ANY class */, 0, 0, 0, 1, &r) ==
        DNS_RCODE_REFUSED && r.na == 0, "class ANY is REFUSED (we serve IN only)");
-    CK(ask_ex("www.pepenet.pepe", DNS_A, 0, 0, 0, 0, 1, &r) == DNS_RCODE_REFUSED,
+    CK(ask_ex("www.dogenet.doge", DNS_A, 0, 0, 0, 0, 1, &r) == DNS_RCODE_REFUSED,
        "class 0 is REFUSED");
     CK(ask_ex("example.com", DNS_A, 3, 0, 0, 0, 1, &r) == DNS_RCODE_REFUSED,
        "a wrong-class query for an unhosted name is still REFUSED");
@@ -401,11 +401,11 @@ static void section_negative(void) {
 /* ═══════════ never a wrong answer + echo integrity ═════════════════════ */
 static void section_integrity(void) {
     static const char *NAMES[] = {
-        "www.pepenet.pepe", "pepenet.pepe", "plain.pepenet.pepe",
-        "alias.pepenet.pepe", "txt.pepenet.pepe", "big.pepenet.pepe",
-        "_443._tcp.www.pepenet.pepe", "_443._tcp.pepenet.pepe",
-        "nope.pepenet.pepe", "nobody.pepe", "example.com", "pepe", "",
-        "gpt.pepe", "gpt.pepe.gpt.pepe", "bad.gpt.pepe", "ab--cd.pepe",
+        "www.dogenet.doge", "dogenet.doge", "plain.dogenet.doge",
+        "alias.dogenet.doge", "txt.dogenet.doge", "big.dogenet.doge",
+        "_443._tcp.www.dogenet.doge", "_443._tcp.dogenet.doge",
+        "nope.dogenet.doge", "nobody.doge", "example.com", "doge", "",
+        "gpt.doge", "gpt.doge.gpt.doge", "bad.gpt.doge", "ab--cd.doge",
     };
     static const uint16_t QT[] = { DNS_A, DNS_AAAA, DNS_CNAME, DNS_NS, DNS_MX,
                                    DNS_TXT, DNS_TLSA, DNS_SOA, 255, 65535 };
@@ -454,7 +454,7 @@ static void section_integrity(void) {
     CK(badflags == 0, "QR/AA set, RD echoed, RA and Z clear on every response");
 
     /* RD=0 must come back RD=0 */
-    g_reqlen = mkquery(g_req, sizeof g_req, 7, 0x0000, "www.pepenet.pepe", DNS_A, DNS_CLASS_IN, 0, 0);
+    g_reqlen = mkquery(g_req, sizeof g_req, 7, 0x0000, "www.dogenet.doge", DNS_A, DNS_CLASS_IN, 0, 0);
     { dns_query q; dns_parse_query(g_req, g_reqlen, &q);
       g_outlen = dnsd_core_answer(&DC, &q, g_out, sizeof g_out, 0);
       decode(g_out, g_outlen, &r);
@@ -464,15 +464,15 @@ static void section_integrity(void) {
 /* ═══════════ EDNS0 / TC / budgets ══════════════════════════════════════ */
 static void section_edns(void) {
     resp r;
-    CK(ask_ex("www.pepenet.pepe", DNS_A, DNS_CLASS_IN, 0, 0, 0, 1, &r) == DNS_RCODE_NOERROR &&
+    CK(ask_ex("www.dogenet.doge", DNS_A, DNS_CLASS_IN, 0, 0, 0, 1, &r) == DNS_RCODE_NOERROR &&
        r.ar == 0 && !r.opt, "a non-EDNS query gets no OPT back");
-    CK(ask_ex("www.pepenet.pepe", DNS_A, DNS_CLASS_IN, 1, 4096, 0, 1, &r) == DNS_RCODE_NOERROR &&
+    CK(ask_ex("www.dogenet.doge", DNS_A, DNS_CLASS_IN, 1, 4096, 0, 1, &r) == DNS_RCODE_NOERROR &&
        r.ar == 1 && r.opt && r.opt_payload == 1232 && r.opt_version == 0,
        "an EDNS query gets an OPT advertising our 1232-byte cap, version 0");
 
     /* the fat label: ANY over plain UDP must not fit 512 bytes */
-    int rc = ask_ex("big.pepenet.pepe", 255, DNS_CLASS_IN, 0, 0, 0, 1, &r);
-    printf("       ANY big.pepenet.pepe: udp512 -> %zu bytes, %d answers, TC=%d\n",
+    int rc = ask_ex("big.dogenet.doge", 255, DNS_CLASS_IN, 0, 0, 0, 1, &r);
+    printf("       ANY big.dogenet.doge: udp512 -> %zu bytes, %d answers, TC=%d\n",
            g_outlen, r.na, (r.flags >> 9) & 1);
     CK(rc == DNS_RCODE_NOERROR && g_outlen <= 512, "a UDP answer never exceeds the 512 budget");
     CK((r.flags & 0x0200) != 0, "an over-budget UDP answer sets TC");
@@ -480,19 +480,19 @@ static void section_edns(void) {
     CK(r.id == 1 && qsec_echoed(&r), "a truncated response still echoes the ID and question");
     int udp_na = r.na;
 
-    rc = ask_ex("big.pepenet.pepe", 255, DNS_CLASS_IN, 1, 1232, 0, 1, &r);
+    rc = ask_ex("big.dogenet.doge", 255, DNS_CLASS_IN, 1, 1232, 0, 1, &r);
     CK(rc == DNS_RCODE_NOERROR && g_outlen <= 1232, "an EDNS answer respects the 1232 cap");
     CK(r.opt && r.ar == 1, "the OPT is present even on a truncated EDNS answer");
 
-    rc = ask_ex("big.pepenet.pepe", 255, DNS_CLASS_IN, 0, 0, 1 /*tcp*/, 1, &r);
-    printf("       ANY big.pepenet.pepe: tcp -> %zu bytes, %d answers, TC=%d\n",
+    rc = ask_ex("big.dogenet.doge", 255, DNS_CLASS_IN, 0, 0, 1 /*tcp*/, 1, &r);
+    printf("       ANY big.dogenet.doge: tcp -> %zu bytes, %d answers, TC=%d\n",
            g_outlen, r.na, (r.flags >> 9) & 1);
     CK(rc == DNS_RCODE_NOERROR && r.na == 4, "over TCP the whole RRset is returned");
     CK((r.flags & 0x0200) == 0, "TC is clear over TCP");
     CK(r.na > udp_na, "TCP returns strictly more than the UDP budget allowed");
 
     /* an EDNS client advertising less than 512 is floored at 512 */
-    rc = ask_ex("www.pepenet.pepe", DNS_A, DNS_CLASS_IN, 1, 200, 0, 1, &r);
+    rc = ask_ex("www.dogenet.doge", DNS_A, DNS_CLASS_IN, 1, 200, 0, 1, &r);
     CK(rc == DNS_RCODE_NOERROR && r.na == 1 && g_outlen <= 512,
        "an EDNS payload below 512 is floored at 512, not honoured literally");
 }
@@ -500,7 +500,7 @@ static void section_edns(void) {
 /* ═══════════ ACCEPTANCE: the --tls-redirect DANE policy ════════════════ */
 static void section_tls_redirect(void) {
     resp r;
-    CK(ask("www.pepenet.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("www.dogenet.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        memcmp(r.a[0].rd, "\x0a\x00\x00\x02", 4) == 0,
        "with --tls-redirect OFF a DANE name still answers its real A");
 
@@ -508,7 +508,7 @@ static void section_tls_redirect(void) {
     DC.tls_redirect_ip[0] = 127; DC.tls_redirect_ip[1] = 0;
     DC.tls_redirect_ip[2] = 0;   DC.tls_redirect_ip[3] = 1;
 
-    CK(ask("www.pepenet.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("www.dogenet.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        memcmp(r.a[0].rd, "\x7f\x00\x00\x01", 4) == 0,
        "a name WITH _443._tcp.<sub> TLSA is steered to the proxy IP");
     { int leaked = 0;
@@ -516,34 +516,34 @@ static void section_tls_redirect(void) {
           if (r.a[i].type == DNS_A && memcmp(r.a[i].rd, "\x0a\x00\x00\x02", 4) == 0) leaked = 1;
       CK(!leaked, "  ... and the real origin A is NOT also returned"); }
 
-    CK(ask("pepenet.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("dogenet.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        memcmp(r.a[0].rd, "\x7f\x00\x00\x01", 4) == 0,
        "the apex, whose TLSA is at _443._tcp, is steered too");
 
     /* ── THE ACCEPTANCE CASE: an A record but NO TLSA ─────────────────────
      * README: "Names without a _443._tcp TLSA are untouched, so plain A
-     * lookups still resolve normally." pepenet-tls src/origin.h: "No TLSA =>
+     * lookups still resolve normally." dogenet-tls src/origin.h: "No TLSA =>
      * the origin cannot be DANE-authenticated, so it is NOT servable (0) —
      * never fall back to an unverified connection." Steering such a name at
      * the proxy would therefore turn a working plain-HTTP name into a hard
      * failure, so the resolver MUST return the real A. */
-    CK(ask("plain.pepenet.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("plain.dogenet.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        r.a[0].type == DNS_A && memcmp(r.a[0].rd, "\x0a\x00\x00\x09", 4) == 0,
        "ACCEPTANCE: a subdomain with an A but NO _443._tcp TLSA answers its REAL A");
     CK(memcmp(r.a[0].rd, "\x7f\x00\x00\x01", 4) != 0,
        "ACCEPTANCE:   ... and is never steered at the DANE proxy");
-    CK(ask("plain.pepenet.pepe", DNS_TLSA, &r) == DNS_RCODE_NOERROR && r.na == 0,
+    CK(ask("plain.dogenet.doge", DNS_TLSA, &r) == DNS_RCODE_NOERROR && r.na == 0,
        "ACCEPTANCE:   ... and its TLSA query is NODATA, never a fabricated pin");
 
     /* the redirect touches A (and ANY) only */
-    CK(ask("www.pepenet.pepe", DNS_AAAA, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("www.dogenet.doge", DNS_AAAA, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        r.a[0].type == DNS_AAAA && r.a[0].rd[0] == 0x20,
        "AAAA is untouched by --tls-redirect (v6 keeps the real origin)");
-    CK(ask("_443._tcp.www.pepenet.pepe", DNS_TLSA, &r) == DNS_RCODE_NOERROR &&
+    CK(ask("_443._tcp.www.dogenet.doge", DNS_TLSA, &r) == DNS_RCODE_NOERROR &&
        r.na == 1 && r.a[0].rdlen == 35,
        "the TLSA record itself is still served verbatim under --tls-redirect");
 
-    { int rc = ask("www.pepenet.pepe", 255, &r);
+    { int rc = ask("www.dogenet.doge", 255, &r);
       int have_redirect = 0, have_real = 0, have_v6 = 0;
       for (int i = 0; i < r.na; i++) {
           if (r.a[i].type == DNS_A && !memcmp(r.a[i].rd, "\x7f\x00\x00\x01", 4)) have_redirect = 1;
@@ -554,7 +554,7 @@ static void section_tls_redirect(void) {
          "ANY under --tls-redirect swaps the A and keeps the other types"); }
 
     /* an unknown label is still NXDOMAIN, never a redirect */
-    CK(ask("nope.pepenet.pepe", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
+    CK(ask("nope.dogenet.doge", DNS_A, &r) == DNS_RCODE_NXDOMAIN && r.na == 0,
        "--tls-redirect never invents an answer for an unknown name");
     DC.tls_redirect = 0;
 }
@@ -569,24 +569,24 @@ static void section_tls_redirect(void) {
 static void section_user_bugs(void) {
     resp r;
     zone_rec tmp;
-    CK(zone_build_rec("gpt.pepe", "A", 300, "216.24.57.1", &tmp) == -1,
+    CK(zone_build_rec("gpt.doge", "A", 300, "216.24.57.1", &tmp) == -1,
        "(evidence) the publishing front door refuses the TLD-bearing label outright");
     CK(zone_build_rec("bad", "CNAME", 300, "216.24.57.1", &tmp) == -1,
        "(evidence) ... and refuses a CNAME whose target is an IP literal");
 
-    CK(ask("gpt.pepe.gpt.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("gpt.doge.gpt.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        memcmp(r.a[0].rd, "\xd8\x18\x39\x01", 4) == 0,
-       "(evidence) a record labelled \"gpt.pepe\" in the gpt zone answers at gpt.pepe.gpt.pepe");
-    CK(ask("gpt.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+       "(evidence) a record labelled \"gpt.doge\" in the gpt zone answers at gpt.doge.gpt.doge");
+    CK(ask("gpt.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        memcmp(r.a[0].rd, "\x0a\x01\x01\x01", 4) == 0,
-       "(evidence) ... and the name the user meant, gpt.pepe, serves the apex record instead");
+       "(evidence) ... and the name the user meant, gpt.doge, serves the apex record instead");
 
-    CK(ask("bad.gpt.pepe", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("bad.gpt.doge", DNS_A, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        r.a[0].type == DNS_CNAME && r.a[0].rdlen == 13 &&
        r.a[0].rd[0] == 3 && memcmp(r.a[0].rd + 1, "216", 3) == 0,
        "(evidence) a CNAME to an IP literal is served as a 4-label dname, not an address");
     /* every other type at that label CNAME-chases to the same dead end */
-    CK(ask("bad.gpt.pepe", DNS_TLSA, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
+    CK(ask("bad.gpt.doge", DNS_TLSA, &r) == DNS_RCODE_NOERROR && r.na == 1 &&
        r.a[0].type == DNS_CNAME,
        "(evidence) ... every other qtype chases the same CNAME");
     { char tgt[128]; size_t o = 0; const uint8_t *rd = r.a[0].rd;
@@ -595,7 +595,7 @@ static void section_user_bugs(void) {
           memcpy(tgt + o, rd + p + 1, rd[p]); o += rd[p]; }
       tgt[o] = '\0';
       size_t tl = strlen(tgt);
-      CK(strcmp(tgt, "216.24.57.1") == 0 && !(tl > 5 && !strcmp(tgt + tl - 5, ".pepe")),
+      CK(strcmp(tgt, "216.24.57.1") == 0 && !(tl > 5 && !strcmp(tgt + tl - 5, ".doge")),
          "(evidence) ... and the target \"216.24.57.1\" is in no zone — the chain dead-ends"); }
 }
 
@@ -604,7 +604,7 @@ static void section_user_bugs(void) {
 static void section_bounds(void) {
     static uint8_t arena[2048];
     dns_query q;
-    g_reqlen = mkquery(g_req, sizeof g_req, 9, 0x0100, "www.pepenet.pepe", DNS_A, DNS_CLASS_IN, 0, 0);
+    g_reqlen = mkquery(g_req, sizeof g_req, 9, 0x0100, "www.dogenet.doge", DNS_A, DNS_CLASS_IN, 0, 0);
     dns_parse_query(g_req, g_reqlen, &q);
     int bad = 0; size_t firstfit = 0;
     for (size_t cap = 0; cap <= 200; cap++) {
@@ -620,7 +620,7 @@ static void section_bounds(void) {
     CK(firstfit >= 12, "  ... and reports 0 until a header+question actually fits");
 
     /* the same, with EDNS on (limit = budget - 11 can underflow at tiny caps) */
-    g_reqlen = mkquery(g_req, sizeof g_req, 9, 0x0100, "www.pepenet.pepe", DNS_A, DNS_CLASS_IN, 1, 4096);
+    g_reqlen = mkquery(g_req, sizeof g_req, 9, 0x0100, "www.dogenet.doge", DNS_A, DNS_CLASS_IN, 1, 4096);
     dns_parse_query(g_req, g_reqlen, &q);
     bad = 0;
     for (size_t cap = 0; cap <= 200; cap++) {
@@ -647,7 +647,7 @@ int main(void) {
     if (!st) { printf("dnsd_core_test: cannot open the store\n"); return 2; }
 
     memset(&DC, 0, sizeof DC);
-    DC.st = st; DC.oracle = ORC; DC.suffix = "pepe";
+    DC.st = st; DC.oracle = ORC; DC.suffix = "doge";
     DC.ufd = DC.tfd = -1;
 
     printf("-- fixtures --\n");                     publish(st);

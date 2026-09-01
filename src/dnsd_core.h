@@ -4,7 +4,7 @@
  * struct instead of file-scope globals: UDP + TCP DNS on one addr/port,
  * EDNS0 (cap 1232) + TC/TCP fallback, per-query ownership gating, the
  * --tls-redirect DANE steering. dnsd drives it from its CLI loop; a GUI host
- * (pepenet-desktop) drives the same core from its own resolver thread.
+ * (dogenet-desktop) drives the same core from its own resolver thread.
  *
  * Threading: the caller owns st/oracle and must call bind/poll/close from ONE
  * thread (the handles are plain sqlite connections — WAL makes them safe
@@ -23,7 +23,7 @@ typedef struct {
     /* caller-owned read handles (open your own connections; WAL-safe) */
     SpState      *st;               /* the record store */
     SpChainOracle oracle;           /* ownership (lease-gated), e.g. dns_chain */
-    const char *suffix;             /* hostchain TLD, no dot ("pepe") */
+    const char *suffix;             /* hostchain TLD, no dot ("doge") */
     int         tls_redirect;       /* answer A=<ip> for DANE names */
     uint8_t     tls_redirect_ip[4];
     int         verbose;

@@ -1,5 +1,5 @@
-/* dns_state.h — the DNS overlay over pepenet-mesh's sp_state (anchor-ordered
- * per-key LWW; see pepenet/state.h for the replication model).
+/* dns_state.h — the DNS overlay over dogenet-mesh's sp_state (anchor-ordered
+ * per-key LWW; see dogenet/state.h for the replication model).
  *
  * A zone is WHAT THE STORE CURRENTLY HOLDS for a name: one row per
  * (label, type) — the sp_state key — whose op payload is ttl ‖ rdata. Editing
@@ -16,7 +16,7 @@
  *   • gossip (off-chain): an sp_state op — key = label ‖ type_be16, payload =
  *     ttl:var ‖ rdata — signed by the owner key or a §2.2 DNS_SCOPE hot key.
  *   • on-chain (escape hatch): the bare 0xD8 carrier in an OP_RETURN,
- *     0xFF 'P' 'N' 0xD8 ‖ labellen:var label ‖ type:var ‖ ttl:var ‖ rdata,
+ *     0xFF 'D' 'N' 0xD8 ‖ labellen:var label ‖ type:var ‖ ttl:var ‖ rdata,
  *     authenticated by the spend from the owner's address; its ANCHOR is its
  *     inclusion height — the same ordering axis as the gossiped form. It must
  *     fit DNS_ONCHAIN_MAX to relay permissionlessly. */
@@ -25,7 +25,7 @@
 
 #include <stdint.h>
 #include "zone.h"
-#include "pepenet/state.h"
+#include "dogenet/state.h"
 
 #define DNS_SCOPE       0x20    /* §2.2 delegation scope bit for zone ops */
 #define DNS_BUDGET      8192    /* bytes of held ops per name */

@@ -44,11 +44,11 @@ static int is_ip_literal(const char *s)
     return inet_pton(AF_INET, s, &a4) == 1 || inet_pton(AF_INET6, s, &a6) == 1;
 }
 
-/* The hostchain TLD every pepenet zone hangs under (dnsd's --suffix default).
+/* The hostchain TLD every dogenet zone hangs under (dnsd's --suffix default).
  * A record's label is relative to its apex by construction, so a label that
- * already carries the suffix ("gpt.pepe" inside the gpt zone) can only ever
+ * already carries the suffix ("gpt.doge" inside the gpt zone) can only ever
  * answer at <label>.<apex>.<tld> — never at the name the author meant. */
-#define ZONE_TLD_SUFFIX ".pepe"
+#define ZONE_TLD_SUFFIX ".doge"
 
 static int label_carries_tld(const char *label)
 {
@@ -111,7 +111,7 @@ static int build_rdata(zone_rec *rec, const char *rest)
         /* An address literal is never a legal CNAME/NS target — RFC 1034 §3.6.2
          * wants a domain name. dns_encode_name would turn "216.24.57.1" into
          * four labels: legal wire, but a name that resolves nowhere, so every
-         * chase of it (pepenet-tls' in-zone CNAME walk included) dead-ends. */
+         * chase of it (dogenet-tls' in-zone CNAME walk included) dead-ends. */
         if (rec->type != DNS_PTR && is_ip_literal(tok)) return -1;
         return 0;
     }

@@ -1,16 +1,16 @@
-# pepenet-dns — DNS over the pepenet namespace.
+# dogenet-dns — DNS over the dogenet namespace.
 #
 # dnsd is a first-class CHAIN peer: it speaks the host chain's P2P protocol on the
 # chain port and the DNS mesh rides that same wire as dnz* commands (peer-discovery
 # slice 3) — no separate mesh port. So the binary embeds the canonical sync engine
-# (../namespace-indexer: idx_serve + indexer_main) alongside pepenet-mesh's
+# (../namespace-indexer: idx_serve + indexer_main) alongside dogenet-mesh's
 # anchor-ordered state store (sp_state) and the DNS overlay (dns_state/dns_net).
 #
 # ONE protocol pin, one truth: everything compiles against the INDEXER'S protocol
-# submodule (namespace-indexer/protocol), and pepenet-mesh's modules are compiled
-# FROM SOURCE against it (never the prebuilt libpepenetnet.a, which bundles its
+# submodule (namespace-indexer/protocol), and dogenet-mesh's modules are compiled
+# FROM SOURCE against it (never the prebuilt libdogenetnet.a, which bundles its
 # own hash/secp objects from a different protocol pin). This mirrors the
-# pepenet-desktop CMake composition, which proves the symbol graph links. The
+# dogenet-desktop CMake composition, which proves the symbol graph links. The
 # quoted-"secp256k1.h" own-dir-first dance (protocol-sm shim vs vendored libsecp)
 # is handled by the per-group include sets below (INC_IDX has libsecp for its ANGLE
 # includes; INC_MESH/INC_DNS do not, so their quoted include resolves to the shim).
@@ -21,8 +21,8 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wshadow
 
-# ── sibling repos (relative, as the pepenet repo family does) ────────────────
-MESHDIR := ../pepenet-mesh
+# ── sibling repos (relative, as the dogenet repo family does) ────────────────
+MESHDIR := ../dogenet-mesh
 IDX     := ../namespace-indexer
 
 # the single protocol pin (the indexer's) + its vendored libsecp + secp shim
@@ -42,7 +42,7 @@ ENGINE_SRC := $(addprefix $(SMDIR)/,fold.c decode.c oracle.c digest.c state.c \
 # indexer chain sources (minus its CLI main.c / test_chain.c) + secp shim
 IDX_SRC    := $(addprefix $(IDXSRC)/,attrib.c adapter.c oracle_feed.c db.c chain.c \
               base58.c sync.c pow.c serve_store.c txcheck.c mempool.c) $(SHIM)
-# pepenet-mesh facade, from source (sp_* crypto/view/wire/state)
+# dogenet-mesh facade, from source (sp_* crypto/view/wire/state)
 MESH_SRC   := $(addprefix $(MESHDIR)/src/,crypto.c view.c wire.c state.c)
 # the DNS overlay + the dnsd driver
 DNS_SRC    := src/dns_state.c src/dns_chain.c src/dns_net.c src/zone.c \
@@ -89,7 +89,7 @@ dns-cli: src/dns-cli.c
 # Tests the DNS packing + LWW admission + gossip framing in isolation, with a
 # fake chain oracle — not the chain-wire node. Links the shared mesh's prebuilt
 # lib (it bundles sp_state + the hash/secp shim), same as the old codec tests.
-NETLIB   := $(MESHDIR)/libpepenetnet.a
+NETLIB   := $(MESHDIR)/libdogenetnet.a
 TEST_SRC := test/state_dns_test.c src/dns_state.c src/dns_net.c src/zone.c src/dns_wire.c
 INC_TEST := -Isrc -I$(MESHDIR)/include
 
@@ -154,7 +154,7 @@ clean-tests:
 # ping-pong inv→get→dat forever, because on_zdat answers a no-change dump with
 # another inv), so it exits non-zero. Folding it into check-all would make the
 # green suite red for a reason that is not a regression — the same split
-# pepenet-tls uses for check-deep.
+# dogenet-tls uses for check-deep.
 #
 #   make check-gossip     peer table, hostile frames, 200k-mutation fuzz,
 #                         inv/get/dat semantics, the hold queue, convergence

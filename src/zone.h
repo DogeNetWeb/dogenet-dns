@@ -1,10 +1,10 @@
-/* zone.h — a signed record set for one pepenet apex name.
+/* zone.h — a signed record set for one dogenet apex name.
  *
  * The zone file is a simple whitespace-delimited text format (see
- * zones/pepenet.zone). Each record is parsed immediately into its final wire
+ * zones/dogenet.zone). Each record is parsed immediately into its final wire
  * rdata so the responder only copies bytes. The apex itself is the flat
- * pepenet name — a DNS label per namespace-protocol §3.1 ([a-z0-9-], 1..32);
- * callers validate with sp_name_valid (pepenet-mesh). Subdomain structure
+ * dogenet name — a DNS label per namespace-protocol §3.1 ([a-z0-9-], 1..32);
+ * callers validate with sp_name_valid (dogenet-mesh). Subdomain structure
  * lives in the `label` field (ordinary DNS labels, e.g. `_443._tcp`). */
 #ifndef ZONE_H
 #define ZONE_H
@@ -24,7 +24,7 @@ typedef struct {
 } zone_rec;
 
 typedef struct {
-    char     apex[64];    /* flat pepenet name this zone belongs to */
+    char     apex[64];    /* flat dogenet name this zone belongs to */
     uint64_t serial;
     int      n;
     zone_rec recs[ZONE_MAX_RECS];

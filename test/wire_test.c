@@ -627,12 +627,12 @@ static void section_adversarial(void) {
 static size_t fixture(int which, uint8_t *b, size_t cap) {
     char nm[300];
     switch (which) {
-    case 0: return build_query(b, cap, 0xBEEF, 0x0100, "www.pepenet.pepe", DNS_A, DNS_CLASS_IN, 0, 0);
-    case 1: return build_query(b, cap, 0xBEEF, 0x0100, "_443._tcp.www.pepenet.pepe", DNS_TLSA, DNS_CLASS_IN, 1, 4096);
+    case 0: return build_query(b, cap, 0xBEEF, 0x0100, "www.dogenet.doge", DNS_A, DNS_CLASS_IN, 0, 0);
+    case 1: return build_query(b, cap, 0xBEEF, 0x0100, "_443._tcp.www.dogenet.doge", DNS_TLSA, DNS_CLASS_IN, 1, 4096);
     case 2: return build_query(b, cap, 0x0001, 0x0000, "", DNS_NS, DNS_CLASS_IN, 0, 0);
     case 3: { max_name(nm); return build_query(b, cap, 0x7FFF, 0x0100, nm, DNS_TXT, DNS_CLASS_IN, 1, 1232); }
     case 4: {   /* a full response: question + 4 answers + OPT */
-        size_t qn = build_query(b, cap, 0x4242, 0x0100, "a.b.c.pepe", 255, DNS_CLASS_IN, 1, 1232);
+        size_t qn = build_query(b, cap, 0x4242, 0x0100, "a.b.c.doge", 255, DNS_CLASS_IN, 1, 1232);
         if (!qn) return 0;
         dns_query q; if (dns_parse_query(b, qn, &q) != 0) return 0;
         dns_resp r; dns_resp_begin(&r, b, cap, &q, DNS_RCODE_NOERROR);
@@ -649,7 +649,7 @@ static size_t fixture(int which, uint8_t *b, size_t cap) {
         hdr(b, 1, 1, 0, 0);
         size_t o = 12;
         b[o++] = 3; memcpy(b + o, "www", 3); o += 3;
-        b[o++] = 4; memcpy(b + o, "pepe", 4); o += 4;
+        b[o++] = 4; memcpy(b + o, "doge", 4); o += 4;
         b[o++] = 0;
         p16(b + o, DNS_A); o += 2; p16(b + o, DNS_CLASS_IN); o += 2;
         b[o++] = 0xC0; b[o++] = 0x0C;                 /* owner -> offset 12 */
@@ -739,7 +739,7 @@ static int arena_clean(size_t from) {
 
 static void section_encode_bounds(void) {
     g_where = "encode bounds";
-    const char *nm = "www.pepenet.pepe";
+    const char *nm = "www.dogenet.doge";
     uint8_t scratch[512];
     int need = dns_encode_name(scratch, sizeof scratch, nm);
     CK(need == 18, "dns_encode_name reports the exact wire length");
@@ -769,8 +769,8 @@ static void section_encode_bounds(void) {
     memset(big, 'a', 63); big[63] = '\0';
     CK(dns_encode_name(scratch, sizeof scratch, big) == 65, "a 63-byte label encodes (65 bytes)");
     { uint8_t fq[64], bare[64];
-      int a = dns_encode_name(fq, sizeof fq, "www.pepe.");
-      int c = dns_encode_name(bare, sizeof bare, "www.pepe");
+      int a = dns_encode_name(fq, sizeof fq, "www.doge.");
+      int c = dns_encode_name(bare, sizeof bare, "www.doge");
       CK(a == c && a == 10 && memcmp(fq, bare, (size_t)a) == 0,
          "a trailing dot (FQDN form) encodes identically to the bare name"); }
     CK(dns_encode_name(scratch, sizeof scratch, "a..b") == -1, "an empty interior label is rejected");

@@ -7,8 +7,8 @@
 #include <strings.h>
 #include <ctype.h>
 
-#include "pepenet/wire.h"
-#include "pepenet/crypto.h"
+#include "dogenet/wire.h"
+#include "dogenet/crypto.h"
 
 static int fail3(char *err, int errlen, const char *m) {
     if (err && errlen > 0) snprintf(err, (size_t)errlen, "%s", m);
@@ -54,11 +54,11 @@ int dns_payload_unpack(const uint8_t *p, int plen, uint32_t *ttl,
     return *rdlen >= 1 && *rdlen <= ZONE_MAX_RDATA;
 }
 
-/* ── on-chain carrier (0xFF 'P' 'N' 0xD8) ───────────────────────────────────── */
+/* ── on-chain carrier (0xFF 'D' 'N' 0xD8) ───────────────────────────────────── */
 int dns_rec_encode(const zone_rec *r, uint8_t *out, int outmax) {
     int o = 0, n; uint8_t tmp[8];
     if (outmax < 4) return -1;
-    out[o++] = 0xFF; out[o++] = 'P'; out[o++] = 'N'; out[o++] = ZONE_OP;
+    out[o++] = 0xFF; out[o++] = 'D'; out[o++] = 'N'; out[o++] = ZONE_OP;
     int ll = (int)strlen(r->label);
     n = sp_wvar(tmp, (uint64_t)ll);   if (o + n + ll > outmax) return -1; memcpy(out + o, tmp, n); o += n;
     memcpy(out + o, r->label, (size_t)ll); o += ll;
@@ -70,7 +70,7 @@ int dns_rec_encode(const zone_rec *r, uint8_t *out, int outmax) {
 }
 
 int dns_rec_decode(const uint8_t *c, int clen, zone_rec *r) {
-    if (clen < 4 || c[0] != 0xFF || c[1] != 'P' || c[2] != 'N' || c[3] != ZONE_OP) return 0;
+    if (clen < 4 || c[0] != 0xFF || c[1] != 'D' || c[2] != 'N' || c[3] != ZONE_OP) return 0;
     int off = 4; uint64_t ll, type, ttl;
     if (!sp_rvar(c, clen, &off, &ll) || ll >= sizeof r->label || off + (int)ll > clen) return 0;
     memcpy(r->label, c + off, (size_t)ll); r->label[ll] = '\0'; off += (int)ll;

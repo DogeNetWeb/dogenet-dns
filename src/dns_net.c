@@ -6,8 +6,8 @@
 #include <string.h>
 #include <time.h>
 
-#include "pepenet/wire.h"
-#include "pepenet/crypto.h"
+#include "dogenet/wire.h"
+#include "dogenet/crypto.h"
 
 #define MAX_PEERS   64
 #define HOLD_SLOTS  64

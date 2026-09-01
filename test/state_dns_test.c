@@ -7,7 +7,7 @@
 #include "dns_state.h"
 #include "dns_net.h"
 #include "zone.h"
-#include "pepenet/crypto.h"
+#include "dogenet/crypto.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,7 +85,7 @@ int main(void) {
         uint8_t car[128];
         int cl = dns_rec_encode(&r, car, sizeof car);
         CK(cl > 0 && cl <= DNS_ONCHAIN_MAX, "on-chain carrier fits 80B");
-        CK(car[1] == 'P' && car[2] == 'N', "carrier wears the PN prefix");
+        CK(car[1] == 'D' && car[2] == 'N', "carrier wears the DN prefix");
         zone_rec r2;
         CK(dns_rec_decode(car, cl, &r2) && r2.type == 1 && r2.ttl == 60 &&
            r2.rdlen == 4 && !strcmp(r2.label, "www"), "carrier decodes");

@@ -1,23 +1,23 @@
-/* dnsd.c — the pepenet-dns node: a first-class CHAIN peer that gossips DNS.
+/* dnsd.c — the dogenet-dns node: a first-class CHAIN peer that gossips DNS.
  *
- * A pepenet node speaks the host chain's P2P protocol on the chain port; the DNS
+ * A dogenet node speaks the host chain's P2P protocol on the chain port; the DNS
  * mesh rides that same wire as extra dn* commands (peer-discovery slice 3) — no
  * separate mesh port. Three threads:
  *
  *   • sync thread — indexer_main("sync") in a loop; keeps the ownership db
- *     (pep.db) and the NODE_NETWORK_LIMITED serve window (serve-<coin>.db)
+ *     (doge.db) and the NODE_NETWORK_LIMITED serve window (serve-<coin>.db)
  *     fresh by syncing the chain outbound. --no-sync if an external indexer
  *     already feeds the db on this box.
  *   • net thread  — dns_net + idx_serve: listen on the chain port (a public
  *     seed) and/or dial --peer chain peers, and gossip zones as dnz* commands
- *     over every "/pepenet-" connection. Owns the write store; services the
+ *     over every "/dogenet-" connection. Owns the write store; services the
  *     ctl socket + startup publish + the daily expiry sweep in the mesh tick.
  *   • main thread — the UDP/TCP DNS resolver (dnsd_core), separate read handles
  *     (sqlite WAL makes concurrent read-while-write safe).
  *
  * A node with --key/--name is an owner publishing a zone; a node without just
  * mirrors everything gossiped and resolves what it pulls from peers. Records
- * ride the anchor-ordered LWW store (pepenet/state.h): every op is signed over
+ * ride the anchor-ordered LWW store (dogenet/state.h): every op is signed over
  * a recent block-header hash, highest anchor wins per (label, type), a `del`
  * leaves the outranking tombstone, `clear` voids the whole zone below its
  * anchor. Per-name budget DNS_BUDGET; no store TTL — records live until
@@ -30,7 +30,7 @@
 #include "zone.h"
 #include "indexer.h"        /* idx_serve + IdxMeshHooks + indexer_main + idx_sync_* */
 #include "db.h"             /* idx_db_open / idx_db_peers_agent (discovered peers) */
-#include "pepenet/crypto.h" /* sp_pubkey, sp_name_valid */
+#include "dogenet/crypto.h" /* sp_pubkey, sp_name_valid */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +47,7 @@
 #include <sys/un.h>
 #include <netinet/in.h>
 
-#define PASS_PAUSE_S 20        /* pep blocks ~1/min; a pass ends when caught up */
+#define PASS_PAUSE_S 20        /* doge/pep blocks ~1/min; a pass ends when caught up */
 
 static volatile int g_stop = 0;
 static void on_sig(int s) { (void)s; g_stop = 1; idx_sync_stop = 1; }
@@ -61,7 +61,7 @@ static int     g_have_zone = 0;
 static int     g_verbose = 0;
 
 /* the resolver core (main thread only) */
-static DnsdCore g_core = { .suffix = "pepe", .ufd = -1, .tfd = -1 };
+static DnsdCore g_core = { .suffix = "doge", .ufd = -1, .tfd = -1 };
 static DnsChain *g_core_ch;                 /* the resolver's own oracle handle */
 
 /* the net thread's write store + oracle (its thread + the mesh tick only) */
@@ -272,20 +272,21 @@ static int usage(const char *p) {
         "usage: %s --db <indexer.db> --store <zones.db> [options]\n"
         "  --db <path>        indexer sqlite (ownership + chain)     [required]\n"
         "  --store <path>     this node's zone store                 [required]\n"
-        "  --coin <id>        host chain id                          [default pep]\n"
+        "  --coin <id>        host chain id                          [default doge]\n"
         "  --listen <port>    CHAIN serve port (0 = dial-only)       [default 0]\n"
-        "                     a public seed passes its chain port (pep 33874)\n"
+        "                     a public seed passes its chain port (doge 22556)\n"
         "  --peer host:port   a chain peer to dial for the mesh (repeatable)\n"
-        "                     default pep: pepenet.shibpost.com:33874 +\n"
-        "                     net.pepecoin.services:33874; doge: shibpost:22556\n"
+        "                     default doge: dogenet.shibpost.com:22556 +\n"
+        "                     seed.dogecoin.services:22556; pep: pepenet.shibpost.com:33874 +\n"
+        "                     net.pepecoin.services:33874\n"
         "  --sync-peer <ip>   pin the chain-sync peer                [default auto]\n"
         "  --no-sync          do not self-sync (an external indexer feeds --db)\n"
         "  --dns-addr <ip>    UDP/TCP DNS listen addr                [127.0.0.1]\n"
         "  --dns-port <n>     UDP/TCP DNS listen port                [5353]\n"
-        "  --suffix <tld>     hostchain suffix (no dot)              [pepe]\n"
+        "  --suffix <tld>     hostchain suffix (no dot)              [doge]\n"
         "  --tls-redirect <ip> answer A=<ip> for DANE names (steer to local proxy)\n"
         "  --key <file|hex>   owner key — enables publishing --zone + live PUT/DEL\n"
-        "  --name <apex>      flat pepenet name (§3.1: [a-z0-9-], 1..32)\n"
+        "  --name <apex>      flat dogenet name (§3.1: [a-z0-9-], 1..32)\n"
         "  --zone <file>      zone file to publish at startup\n"
         "  --ctl <path>       unix control socket for dns-cli (live updates)\n"
         "  -v                 verbose\n", p);
@@ -294,7 +295,7 @@ static int usage(const char *p) {
 
 int main(int argc, char **argv) {
     const char *db = NULL, *store = NULL, *keyarg = NULL, *name = NULL, *zonef = NULL;
-    const char *dns_addr = "127.0.0.1", *ctl_path = NULL, *coin = "pep", *sync_peer = "auto";
+    const char *dns_addr = "127.0.0.1", *ctl_path = NULL, *coin = "doge", *sync_peer = "auto";
     int dns_port = 5353, do_sync = 1;
     uint16_t chain_port = 0;
     char peers[16][96]; int n_peers = 0;
@@ -337,7 +338,8 @@ int main(int argc, char **argv) {
             snprintf(peers[n_peers++], sizeof peers[0], "pepenet.shibpost.com:33874");
             snprintf(peers[n_peers++], sizeof peers[0], "net.pepecoin.services:33874");
         } else if (!strcmp(coin, "doge")) {
-            snprintf(peers[n_peers++], sizeof peers[0], "pepenet.shibpost.com:22556");
+            snprintf(peers[n_peers++], sizeof peers[0], "dogenet.shibpost.com:22556");
+            snprintf(peers[n_peers++], sizeof peers[0], "seed.dogecoin.services:22556");
         }
     }
 
@@ -347,7 +349,7 @@ int main(int argc, char **argv) {
     }
     if (name) {
         if (!sp_name_valid(name, strlen(name))) {
-            fprintf(stderr, "bad --name '%s': must be a §3.1 pepenet name "
+            fprintf(stderr, "bad --name '%s': must be a §3.1 dogenet name "
                     "([a-z0-9-], 1..32, no lead/trail hyphen, no xn--)\n", name);
             return 1;
         }
@@ -360,13 +362,13 @@ int main(int argc, char **argv) {
     }
 
     /* our P2P subver: the IDX_DNET_MARK prefix (indexer.h; per-deployment at
-       build time, "/pepenet-" default) is the mesh's discovery mark — a
+       build time, "/dogenet-" default) is the mesh's discovery mark — a
        crawler classifies this node as dns-aware by it (peer-discovery design).
        Set before either the sync or serve thread sends a version. */
     idx_sync_agent = IDX_DNET_MARK "dnsd:0.1/";
 
     /* the chain-wire dial list for the mesh: --peer args first, then the crawl's
-       discovered "/pepenet-" peers from the ownership db's peers table. */
+       discovered "/dogenet-" peers from the ownership db's peers table. */
     char dial[1024]; int dl = 0; dial[0] = '\0';
     for (int i = 0; i < n_peers; i++)
         dl += snprintf(dial + dl, sizeof dial - dl, "%s%s", dl ? "," : "", peers[i]);
