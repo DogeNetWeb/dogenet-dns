@@ -276,8 +276,8 @@ static int usage(const char *p) {
         "  --listen <port>    CHAIN serve port (0 = dial-only)       [default 0]\n"
         "                     a public seed passes its chain port (doge 22556)\n"
         "  --peer host:port   a chain peer to dial for the mesh (repeatable)\n"
-        "                     default doge: dogenet.shibpost.com:22556 +\n"
-        "                     seed.dogecoin.services:22556; pep: pepenet.shibpost.com:33874 +\n"
+        "                     default doge: seed.dogecoin.surf:22556;\n"
+        "                     pep: pepenet.shibpost.com:33874 +\n"
         "                     net.pepecoin.services:33874\n"
         "  --sync-peer <ip>   pin the chain-sync peer                [default auto]\n"
         "  --no-sync          do not self-sync (an external indexer feeds --db)\n"
@@ -338,8 +338,7 @@ int main(int argc, char **argv) {
             snprintf(peers[n_peers++], sizeof peers[0], "pepenet.shibpost.com:33874");
             snprintf(peers[n_peers++], sizeof peers[0], "net.pepecoin.services:33874");
         } else if (!strcmp(coin, "doge")) {
-            snprintf(peers[n_peers++], sizeof peers[0], "dogenet.shibpost.com:22556");
-            snprintf(peers[n_peers++], sizeof peers[0], "seed.dogecoin.services:22556");
+            snprintf(peers[n_peers++], sizeof peers[0], "seed.dogecoin.surf:22556");
         }
     }
 
