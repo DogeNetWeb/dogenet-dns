@@ -289,6 +289,8 @@ static int usage(const char *p) {
         "  --name <apex>      flat dogenet name (§3.1: [a-z0-9-], 1..32)\n"
         "  --zone <file>      zone file to publish at startup\n"
         "  --ctl <path>       unix control socket for dns-cli (live updates)\n"
+        "  --advertise-v6     gossip our own IPv6 as a reachable peer (off by default;\n"
+        "                     also IDX_ADVERTISE_V6=1). v6 LISTEN is unaffected.\n"
         "  -v                 verbose\n", p);
     return 2;
 }
@@ -325,6 +327,7 @@ int main(int argc, char **argv) {
             if (!strrchr(argv[i+1], ':')) return usage(argv[0]);
             snprintf(peers[n_peers++], sizeof peers[0], "%s", argv[++i]);
         }
+        else if (!strcmp(argv[i], "--advertise-v6")) setenv("IDX_ADVERTISE_V6", "1", 1);   /* opt-in: gossip our own IPv6 */
         else if (!strcmp(argv[i], "-v")) g_verbose = 1;
         else return usage(argv[0]);
     }
