@@ -41,7 +41,7 @@ ENGINE_SRC := $(addprefix $(SMDIR)/,fold.c decode.c oracle.c digest.c state.c \
               ripemd160.c gen.c harness.c ecmh.c)
 # indexer chain sources (minus its CLI main.c / test_chain.c) + secp shim
 IDX_SRC    := $(addprefix $(IDXSRC)/,attrib.c adapter.c oracle_feed.c db.c chain.c \
-              base58.c sync.c pow.c serve_store.c txcheck.c mempool.c) $(SHIM)
+              base58.c sync.c pow.c serve_store.c txcheck.c mempool.c netaddr.c) $(SHIM)
 # dogenet-mesh facade, from source (sp_* crypto/view/wire/state)
 MESH_SRC   := $(addprefix $(MESHDIR)/src/,crypto.c view.c wire.c state.c)
 # the DNS overlay + the dnsd driver
