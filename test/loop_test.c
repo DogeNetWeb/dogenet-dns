@@ -121,7 +121,16 @@ int main(void) {
       run("L2", A, B, T, CAP);
       sp_state_close(A); sp_state_close(B); }
 
-    printf("-- L7: budget-full livelock (net_test N7), module kept alive, limiter on --\n");
+#if defined(LOOP_A_LEGACY) && defined(LOOP_B_LEGACY)
+#define LOOP_LIMITER_DESC "limiter off (both sides legacy)"
+#elif defined(LOOP_A_LEGACY)
+#define LOOP_LIMITER_DESC "limiter on B only (A legacy)"
+#elif defined(LOOP_B_LEGACY)
+#define LOOP_LIMITER_DESC "limiter on A only (B legacy)"
+#else
+#define LOOP_LIMITER_DESC "limiter on both sides"
+#endif
+    printf("-- L7: budget-full livelock (net_test N7), module kept alive, " LOOP_LIMITER_DESC " --\n");
     { SpState *A = sp_state_open(":memory:"), *B = sp_state_open(":memory:");
       a_owns = 1; int na = 0, nb = 0; char lb[16];
       for (int i = 0; i < 40; i++) { snprintf(lb, sizeof lb, "a%d", i); if (put_fat(A, &ORA, lb) == 1) na++; else break; }

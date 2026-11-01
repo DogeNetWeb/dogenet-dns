@@ -178,7 +178,7 @@ $(1): test/loop_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
 	@mkdir -p build/loop
 	$(CC) $(CFLAGS) $(INC_TEST) $$(call LOOP_REN,A) -Dtime=ft_time $(2) -c src/dns_net.c -o build/loop/$(1)_A.o
 	$(CC) $(CFLAGS) $(INC_TEST) $$(call LOOP_REN,B) -Dtime=ft_time $(3) -c src/dns_net.c -o build/loop/$(1)_B.o
-	$(CC) $(CFLAGS) $(INC_TEST) '-DCHAIN_CRYPTO_H="dogenet/crypto.h"' -o $$@ build/loop/$(1)_A.o build/loop/$(1)_B.o $(LOOP_LIB)
+	$(CC) $(CFLAGS) $(INC_TEST) '-DCHAIN_CRYPTO_H="dogenet/crypto.h"' $(if $(2),-DLOOP_A_LEGACY) $(if $(3),-DLOOP_B_LEGACY) -o $$@ build/loop/$(1)_A.o build/loop/$(1)_B.o $(LOOP_LIB)
 endef
 $(eval $(call LOOP_BIN,loop_test,,))
 $(eval $(call LOOP_BIN,loop_test_mixAB,,-DDNSNET_RL_SLOTS=0))
