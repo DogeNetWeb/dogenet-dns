@@ -36,8 +36,38 @@ static struct {
     time_t        next_ae;
 } g;
 
+/* ── no-change reply limiter ───────────────────────────────────────────────────
+ * on_zdat answers a dump that changed nothing with our digest (send_inv_one).
+ * When one side CANNOT admit the other's ops (lapsed on its chain view, budget,
+ * rule/version drift) the digests never match, and inv → get → dat → inv cycles
+ * at round-trip speed. Cap that reply at one per (peer, name) bucket per AE
+ * period. The table is FIXED-size and keyed by a hash, so attacker-chosen names
+ * cannot grow it; a collision only suppresses more, never sends more. The 60 s
+ * send_inv_all still re-offers everything, so convergence is unchanged. Wire-
+ * neutral: no new command, frame or field — only how often dnzinv is sent. */
+#ifndef DNSNET_RL_SLOTS
+#define DNSNET_RL_SLOTS 1024
+#endif
+#if DNSNET_RL_SLOTS > 0
+static time_t rl_last[DNSNET_RL_SLOTS];
+static int noop_reply_ok(const Peer *from, const char *name) {
+    uint64_t h = 1469598103934665603ULL ^ (uint64_t)(uintptr_t)from;   /* FNV-1a */
+    for (const char *c = name; *c; c++) { h ^= (uint8_t)*c; h *= 1099511628211ULL; }
+    h ^= h >> 29;
+    time_t now = time(NULL), *s = &rl_last[h % DNSNET_RL_SLOTS];
+    if (*s && now - *s < AE_PERIOD_S) return 0;
+    *s = now;
+    return 1;
+}
+#else
+static int noop_reply_ok(const Peer *from, const char *name) { (void)from; (void)name; return 1; }
+#endif
+
 void dnsnet_init(SpState *st, SpChainOracle oracle, int verbose) {
     memset(&g, 0, sizeof g);
+#if DNSNET_RL_SLOTS > 0
+    memset(rl_last, 0, sizeof rl_last);
+#endif
     g.st = st; g.o = oracle; g.verbose = verbose;
 }
 
@@ -232,7 +262,7 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
          * OUR digest for the name (cheap, idempotent); the source zgets from
          * us iff it actually differs, so an equal-state exchange goes silent
          * instead of ping-ponging dumps. */
-        send_inv_one(from, name);
+        if (noop_reply_ok(from, name)) send_inv_one(from, name);
     }
 }
 
