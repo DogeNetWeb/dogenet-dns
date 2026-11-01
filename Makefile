@@ -167,3 +167,7 @@ check-gossip: net_test
 	./net_test
 
 .PHONY: check-gossip
+
+# lease gate on chain MTP (no indexer sources: dns_chain.c + sqlite only)
+dns_chain_test: test/dns_chain_test.c src/dns_chain.c src/dns_chain.h
+	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Isrc -I$(MESHDIR)/include -o $@ test/dns_chain_test.c src/dns_chain.c -lsqlite3
