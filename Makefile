@@ -19,7 +19,7 @@
 # see state_dns_test.
 
 CC      ?= cc
-CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wshadow
+CFLAGS  ?= -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wshadow
 
 # ── sibling repos (relative, as the dogenet repo family does) ────────────────
 MESHDIR := ../dogenet-mesh
