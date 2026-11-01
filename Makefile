@@ -193,3 +193,7 @@ check-loop-legacy: loop_test_legacy
 	! ./loop_test_legacy
 
 .PHONY: check-loop
+
+# lease gate on chain MTP (no indexer sources: dns_chain.c + sqlite only)
+dns_chain_test: test/dns_chain_test.c src/dns_chain.c src/dns_chain.h
+	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Isrc -I$(MESHDIR)/include -o $@ test/dns_chain_test.c src/dns_chain.c -lsqlite3
