@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <time.h>
 
 #include "dogenet/wire.h"
@@ -44,18 +45,32 @@ static struct {
  * period. The table is FIXED-size and keyed by a hash, so attacker-chosen names
  * cannot grow it; a collision only suppresses more, never sends more. The 60 s
  * send_inv_all still re-offers everything, so convergence is unchanged. Wire-
- * neutral: no new command, frame or field — only how often dnzinv is sent. */
+ * neutral: no new command, frame or field — only how often dnzinv is sent.
+ * Bounds: the hash is seeded per process (rl_seed), so a peer cannot aim at a
+ * slot. A peer spraying no-op dumps for >1024 names per minute can keep most
+ * slots stamped; that only delays honest no-change replies by <=60 s per
+ * exchange (send_inv_all re-offers every AE period), never sends more, and the
+ * table stays 1024 x time_t. A reused g.peers[] slot may inherit a stamp and
+ * delay its first reply by <=60 s; acceptable (dnsnet_up's greeting inv covers
+ * it). A stamp in the future (wall clock stepped back) counts as expired. */
 #ifndef DNSNET_RL_SLOTS
 #define DNSNET_RL_SLOTS 1024
 #endif
 #if DNSNET_RL_SLOTS > 0
 static time_t rl_last[DNSNET_RL_SLOTS];
+static uint64_t rl_seed;
+static void rl_reseed(void) {
+    uint64_t s = 0;
+    if (getentropy(&s, sizeof s) != 0)
+        s = (uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)(uintptr_t)&s;
+    rl_seed = s;
+}
 static int noop_reply_ok(const Peer *from, const char *name) {
-    uint64_t h = 1469598103934665603ULL ^ (uint64_t)(uintptr_t)from;   /* FNV-1a */
+    uint64_t h = (1469598103934665603ULL ^ rl_seed) ^ (uint64_t)(uintptr_t)from; /* seeded FNV-1a */
     for (const char *c = name; *c; c++) { h ^= (uint8_t)*c; h *= 1099511628211ULL; }
     h ^= h >> 29;
     time_t now = time(NULL), *s = &rl_last[h % DNSNET_RL_SLOTS];
-    if (*s && now - *s < AE_PERIOD_S) return 0;
+    if (*s && now >= *s && now - *s < AE_PERIOD_S) return 0;   /* future stamp => expired */
     *s = now;
     return 1;
 }
@@ -67,6 +82,7 @@ void dnsnet_init(SpState *st, SpChainOracle oracle, int verbose) {
     memset(&g, 0, sizeof g);
 #if DNSNET_RL_SLOTS > 0
     memset(rl_last, 0, sizeof rl_last);
+    rl_reseed();
 #endif
     g.st = st; g.o = oracle; g.verbose = verbose;
 }
@@ -298,7 +314,8 @@ void dnsnet_tick(void) {
     hold_service();
     time_t now = time(NULL);
     if (!g.next_ae) g.next_ae = now + AE_PERIOD_S;
-    if (now >= g.next_ae) {                 /* periodic anti-entropy re-inv */
+    /* fire if due, or if the wall clock stepped back by more than a period */
+    if (now >= g.next_ae || g.next_ae - now > AE_PERIOD_S) {
         g.next_ae = now + AE_PERIOD_S;
         send_inv_all(NULL);                 /* broadcast to every live peer */
     }

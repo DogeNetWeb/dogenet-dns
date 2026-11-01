@@ -183,8 +183,13 @@ endef
 $(eval $(call LOOP_BIN,loop_test,,))
 $(eval $(call LOOP_BIN,loop_test_mixAB,,-DDNSNET_RL_SLOTS=0))
 $(eval $(call LOOP_BIN,loop_test_mixBA,-DDNSNET_RL_SLOTS=0,))
+$(eval $(call LOOP_BIN,loop_test_legacy,-DDNSNET_RL_SLOTS=0,-DDNSNET_RL_SLOTS=0))
 
 check-loop: loop_test loop_test_mixAB loop_test_mixBA
 	./loop_test && ./loop_test_mixAB && ./loop_test_mixBA
+
+# today's behaviour (no limiter on either side): expected to FAIL
+check-loop-legacy: loop_test_legacy
+	! ./loop_test_legacy
 
 .PHONY: check-loop

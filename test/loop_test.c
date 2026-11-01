@@ -67,6 +67,14 @@ static int put_rec(SpState *st, const SpChainOracle *o) {
     return dns_state_put(st, o, "zone", &r, OPRIV, OPUB, SP_CERT_NONE, NULL, 0, err, sizeof err);
 }
 
+static int put_fat(SpState *st, const SpChainOracle *o, const char *lb) {
+    zone_rec r; memset(&r, 0, sizeof r);
+    snprintf(r.label, sizeof r.label, "%s", lb); r.type = 16; r.ttl = 60; r.rdlen = ZONE_MAX_RDATA;
+    memset(r.rdata, 'x', ZONE_MAX_RDATA);
+    char err[128];
+    return dns_state_put(st, o, "zone", &r, OPRIV, OPUB, SP_CERT_NONE, NULL, 0, err, sizeof err);
+}
+
 #define DELIV_PER_S 200
 static void run(const char *label, SpState *A, SpState *B, int T, long cap) {
     qh = qn = dropped = 0; n_frames = n_inv = n_get = n_dat = n_dat0 = 0;
@@ -111,6 +119,18 @@ int main(void) {
       a_owns = 0; int sw = dns_state_sweep(A, &ORA);
       printf("     (A swept %d name(s))\n", sw);
       run("L2", A, B, T, CAP);
+      sp_state_close(A); sp_state_close(B); }
+
+    printf("-- L7: budget-full livelock (net_test N7), module kept alive, limiter on --\n");
+    { SpState *A = sp_state_open(":memory:"), *B = sp_state_open(":memory:");
+      a_owns = 1; int na = 0, nb = 0; char lb[16];
+      for (int i = 0; i < 40; i++) { snprintf(lb, sizeof lb, "a%d", i); if (put_fat(A, &ORA, lb) == 1) na++; else break; }
+      for (int i = 0; i < 40; i++) { snprintf(lb, sizeof lb, "b%d", i); if (put_fat(B, &ORB, lb) == 1) nb++; else break; }
+      printf("     (A holds %d fat records, B holds %d)\n", na, nb);
+      CK(na > 5 && nb > 5, "L7: both budgets full of different records");
+      run("L7", A, B, T, 16L * (T / 60 + 1) + 16);   /* both sides hold rows: two AE triggers per round; mixed worst 15/round */
+      uint8_t da[32], db[32]; dns_state_digest(A, "zone", da); dns_state_digest(B, "zone", db);
+      CK(memcmp(da, db, 32) != 0, "L7: digests still differ (budget case, bounded not converged)");
       sp_state_close(A); sp_state_close(B); }
 
     printf("-- L0 control: both own; states merge and go quiet --\n");
