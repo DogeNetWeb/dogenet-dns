@@ -19,7 +19,7 @@
 # see state_dns_test.
 
 CC      ?= cc
-CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wshadow
+CFLAGS  ?= -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wshadow
 
 # ── sibling repos (relative, as the dogenet repo family does) ────────────────
 MESHDIR := ../dogenet-mesh
@@ -167,3 +167,33 @@ check-gossip: net_test
 	./net_test
 
 .PHONY: check-gossip
+
+# two-node no-change-reply loop test: dns_net.c compiled twice (A_/B_ symbols,
+# faked time()) — a patched pair, and both mixed pairs (one side built with
+# DNSNET_RL_SLOTS=0, i.e. today's behaviour). Wire-neutral rate limit.
+LOOP_REN = $(foreach f,init up msg down tick announce peers,-Ddnsnet_$(f)=$(1)_dnsnet_$(f))
+LOOP_LIB = test/loop_test.c src/dns_state.c src/zone.c src/dns_wire.c $(NETLIB) $(IDXSECP) -lsqlite3
+define LOOP_BIN
+$(1): test/loop_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+	@mkdir -p build/loop
+	$(CC) $(CFLAGS) $(INC_TEST) $$(call LOOP_REN,A) -Dtime=ft_time $(2) -c src/dns_net.c -o build/loop/$(1)_A.o
+	$(CC) $(CFLAGS) $(INC_TEST) $$(call LOOP_REN,B) -Dtime=ft_time $(3) -c src/dns_net.c -o build/loop/$(1)_B.o
+	$(CC) $(CFLAGS) $(INC_TEST) '-DCHAIN_CRYPTO_H="dogenet/crypto.h"' $(if $(2),-DLOOP_A_LEGACY) $(if $(3),-DLOOP_B_LEGACY) -o $$@ build/loop/$(1)_A.o build/loop/$(1)_B.o $(LOOP_LIB)
+endef
+$(eval $(call LOOP_BIN,loop_test,,))
+$(eval $(call LOOP_BIN,loop_test_mixAB,,-DDNSNET_RL_SLOTS=0))
+$(eval $(call LOOP_BIN,loop_test_mixBA,-DDNSNET_RL_SLOTS=0,))
+$(eval $(call LOOP_BIN,loop_test_legacy,-DDNSNET_RL_SLOTS=0,-DDNSNET_RL_SLOTS=0))
+
+check-loop: loop_test loop_test_mixAB loop_test_mixBA
+	./loop_test && ./loop_test_mixAB && ./loop_test_mixBA
+
+# today's behaviour (no limiter on either side): expected to FAIL
+check-loop-legacy: loop_test_legacy
+	! ./loop_test_legacy
+
+.PHONY: check-loop
+
+# lease gate on chain MTP (no indexer sources: dns_chain.c + sqlite only)
+dns_chain_test: test/dns_chain_test.c src/dns_chain.c src/dns_chain.h
+	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Isrc -I$(MESHDIR)/include -o $@ test/dns_chain_test.c src/dns_chain.c -lsqlite3
