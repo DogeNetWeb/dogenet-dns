@@ -35,6 +35,10 @@ void  dnsnet_tick(void);                               /* hold-queue + anti-entr
 /* A local publish changed `name` — announce it to every live peer. */
 void  dnsnet_announce(const char *name);
 
+/* Optional P10 hook: 1 if `name`'s current ownership epoch is senior (older
+ * owners first under backlog). NULL (default) = everyone is senior. */
+void  dnsnet_set_seniority(int (*fn)(const char *name));
+
 /* live peer count (status surfaces) */
 int   dnsnet_peers(void);
 

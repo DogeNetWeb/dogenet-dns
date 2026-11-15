@@ -174,7 +174,7 @@ check-gossip: net_test
 # two-node no-change-reply loop test: dns_net.c compiled twice (A_/B_ symbols,
 # faked time()) — a patched pair, and both mixed pairs (one side built with
 # DNSNET_RL_SLOTS=0, i.e. today's behaviour). Wire-neutral rate limit.
-LOOP_REN = $(foreach f,init up msg down tick announce peers,-Ddnsnet_$(f)=$(1)_dnsnet_$(f))
+LOOP_REN = $(foreach f,init up msg down tick announce peers set_seniority,-Ddnsnet_$(f)=$(1)_dnsnet_$(f))
 LOOP_LIB = test/loop_test.c src/dns_state.c src/zone.c src/dns_wire.c $(NETLIB) $(IDXSECP) -lsqlite3
 define LOOP_BIN
 $(1): test/loop_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
@@ -200,3 +200,13 @@ check-loop-legacy: loop_test_legacy
 # lease gate on chain MTP (no indexer sources: dns_chain.c + sqlite only)
 dns_chain_test: test/dns_chain_test.c src/dns_chain.c src/dns_chain.h
 	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Isrc -I$(MESHDIR)/include -o $@ test/dns_chain_test.c src/dns_chain.c -lsqlite3
+
+# local anti-spam limits (P1-P4, P6-P8, P10, P11, G1) on a fake clock
+antispam_test: test/antispam_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+	$(CC) $(CFLAGS) $(INC_TEST) -Dtime=ft_time -DDNSNET_TEST_CLOCK_MS=ft_ms -c src/dns_net.c -o build/antispam_dns_net.o
+	$(CC) $(CFLAGS) $(INC_TEST) -o $@ test/antispam_test.c build/antispam_dns_net.o src/dns_state.c src/zone.c src/dns_wire.c $(NETLIB) $(IDXSECP) -lsqlite3
+
+check-antispam: antispam_test
+	./antispam_test
+
+.PHONY: check-antispam
