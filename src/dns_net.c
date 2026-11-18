@@ -1279,13 +1279,17 @@ static int lz_on_dat(Peer *from, const char *name, int ops, int rejected, int pe
             from->lz_bad++; g.c.lz_forged++;
             lz_backoff(from, 30000, from->lz_bad, 600000, now);
         }
-        if (rejected > 0 && ops - rejected <= 0 && !pending) {
-            f->ask[i].st = LZA_BAD;                          /* nothing usable: ask another */
+        (void)ops; (void)pending;
+        if (rejected > 0) {
+            /* a peer that served ANY op failing verification is not trusted to
+             * have served the WHOLE zone: its valid (owner-signed) ops still
+             * landed, but its answer never completes a fetch — ask another. If
+             * nobody else answers, the fetch FAILS (EDE 22), so a partial zone
+             * from a forger is never served as if it were complete. */
+            f->ask[i].st = LZA_BAD;
             lz_ask(f, now);
         } else {
             f->ask[i].st = LZA_OK; f->ask[i].sum = *sum;
-            /* rejected ops do not count toward the peer's set */
-            if (rejected > 0) f->ask[i].sum.n = UINT32_MAX;
             f->ok_n++;
             if (!f->first_ok_ms) f->first_ok_ms = now;
         }
