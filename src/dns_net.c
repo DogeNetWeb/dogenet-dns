@@ -1267,6 +1267,23 @@ static void lz_finish(LzFetch *f, int ok, int64_t now) {
     f->name[0] = '\0';
     lz_evict();
 }
+/* end the fetch when it has what it needs (also called on each answer) */
+static void lz_check(LzFetch *f, int64_t now) {
+    int out = lz_outstanding(f);
+    /* keep LZ_FANOUT asks open until we have a quorum of valid answers */
+    while (f->ok_n + out < LZ_QUORUM && lz_ask(f, now)) out++;
+    int more = lz_can_ask_more(f, now);
+    if (f->ok_n >= LZ_QUORUM ||
+        (f->ok_n >= 1 && out == 0 && !more) ||
+        (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS && out == 0) ||
+        (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS + LZ_ASK_TIMEOUT_MS)) {
+        lz_finish(f, 1, now);
+    } else if (now - f->start_ms >= LZ_FETCH_MAX_MS) {
+        lz_finish(f, f->ok_n > 0, now);
+    } else if (f->ok_n == 0 && out == 0 && f->nask > 0 && !more) {
+        lz_finish(f, 0, now);                            /* everyone tried, nothing valid */
+    }
+}
 /* an answer for a name we track arrived; 1 = it answers one of our fetch asks */
 static int lz_on_dat(Peer *from, const char *name, int ops, int rejected, int pending, const LzSum *sum) {
     LzFetch *f = lz_find(name);
@@ -1293,6 +1310,7 @@ static int lz_on_dat(Peer *from, const char *name, int ops, int rejected, int pe
             f->ok_n++;
             if (!f->first_ok_ms) f->first_ok_ms = now;
         }
+        lz_check(f, now);                                    /* quorum: done now, not next tick */
         return 1;
     }
     return 0;
@@ -1337,20 +1355,7 @@ static void lz_service(int64_t now) {
                 lz_backoff(p, 2000, p->lz_fail, 120000, now);
             }
         }
-        int out = lz_outstanding(f);
-        /* keep LZ_FANOUT asks open until we have a quorum of valid answers */
-        while (f->ok_n + out < LZ_QUORUM && lz_ask(f, now)) out++;
-        int more = lz_can_ask_more(f, now);
-        if (f->ok_n >= LZ_QUORUM ||
-            (f->ok_n >= 1 && out == 0 && !more) ||
-            (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS && out == 0) ||
-            (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS + LZ_ASK_TIMEOUT_MS)) {
-            lz_finish(f, 1, now);
-        } else if (now - f->start_ms >= LZ_FETCH_MAX_MS) {
-            lz_finish(f, f->ok_n > 0, now);
-        } else if (f->ok_n == 0 && out == 0 && f->nask >= LZ_ASK_MAX) {
-            lz_finish(f, 0, now);                            /* everyone tried, nothing valid */
-        }
+        lz_check(f, now);
     }
 }
 

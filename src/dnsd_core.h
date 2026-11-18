@@ -60,6 +60,7 @@ typedef struct {
     int         lazy;
     int         lazy_wait_ms;       /* park a not-ready query up to this (<= 9000) */
     unsigned long lazy_parked, lazy_loading_sent, lazy_failed_sent;
+    int         lazy_recheck;       /* internal: set while re-checking a parked query */
     DnsdPark    park[DNSD_PARK_MAX];
     /* sockets (dnsd_core_bind) */
     int         ufd, tfd;           /* -1 when unbound / tcp unavailable */

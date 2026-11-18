@@ -98,6 +98,10 @@ static void publish_zone_once(void) {
     fprintf(stderr, "dnsd: published %d/%d records for %s\n", ok, g_zone.n, g_apex);
 }
 
+/* LZ: wake pipe for the serve loop (lazy mode) */
+static int g_wake[2] = { -1, -1 };
+static void lazy_kick(void) { if (g_wake[1] >= 0) { char b = 1; (void)!write(g_wake[1], &b, 1); } }
+
 /* LZ: NAMES page collector (one name per line, stops before the reply fills) */
 struct NamesAcc { char *buf; int off, cap, n; };
 static int names_cb(void *u, const char *nm) {
@@ -475,6 +479,12 @@ int main(int argc, char **argv) {
     if (!db || !store) return usage(argv[0]);
     if (lazy) {
         dns_lazy_init(&lc);
+        /* wake the serve loop the moment a query queues a fetch (else <= 1 s) */
+        if (pipe(g_wake) == 0) {
+            fcntl(g_wake[0], F_SETFL, O_NONBLOCK); fcntl(g_wake[1], F_SETFL, O_NONBLOCK);
+            idx_serve_wake_fd = g_wake[0];
+            dns_lazy_set_kick(lazy_kick);
+        }
         const DnsLazyConf *c = dns_lazy_conf();
         g_core.lazy = 1; g_core.lazy_wait_ms = c->wait_ms;
         fprintf(stderr, "dnsd: LAZY mode (namespace-only sync; zones fetched on demand) cache=%s "

@@ -104,7 +104,7 @@ static size_t answer(DnsdCore *dc, const dns_query *q, uint8_t *out, size_t cap,
     /* LZ: an owned name's zone may not be here yet. Never NXDOMAIN/empty for
      * it: serve only a verified fetched zone, else park or signal loading. */
     if (dc->lazy && dns_lazy_enabled()) {
-        int age = -1, ls = dns_lazy_want(apex, &age);
+        int age = -1, ls = dc->lazy_recheck ? dns_lazy_want_recheck(apex, &age) : dns_lazy_want(apex, &age);
         if (ls == DNS_LAZY_READY) {
             uint8_t held[20];                 /* rows of a PREVIOUS owner: re-fetch */
             if (sp_state_owner(dc->st, apex, held) && memcmp(held, owner, 20) != 0) {
@@ -204,7 +204,9 @@ static int park_service(DnsdCore *dc, int64_t now) {
         dns_query q; uint8_t out[4096]; size_t rn = 0;
         if (dns_parse_query(k->q, k->qlen, &q) != 0) { k->used = 0; continue; }
         int nr = 0;
+        dc->lazy_recheck = 1;
         if (now < k->deadline_ms) rn = dnsd_core_answer_lazy(dc, &q, out, sizeof out, 0, &nr);
+        dc->lazy_recheck = 0;
         if (nr) { left++; continue; }
         if (now >= k->deadline_ms) rn = dnsd_core_answer(dc, &q, out, sizeof out, 0);
         if (rn) sendto(dc->ufd, out, rn, 0, (struct sockaddr *)&k->cli, (socklen_t)k->cl);
@@ -301,7 +303,9 @@ static int tcp_answer(DnsdCore *dc, DnsdTcpConn *t) {
             int first = !t->park_ms;
             if (first) t->park_ms = now + dc->lazy_wait_ms;
             int nr = 0;
+            dc->lazy_recheck = !first;
             rn = now < t->park_ms ? dnsd_core_answer_lazy(dc, &q, out, sizeof out, 1, &nr) : 0;
+            dc->lazy_recheck = 0;
             if (nr) { t->last_ms = now; if (first) dc->lazy_parked++; break; }   /* idle clock held */
             if (now >= t->park_ms) rn = dnsd_core_answer(dc, &q, out, sizeof out, 1);
             t->park_ms = 0;

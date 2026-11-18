@@ -42,6 +42,10 @@ enum {
 };
 const char *dns_lazy_state_name(int st);
 
+/* optional: called (any thread, outside the lock) whenever a fetch is queued,
+ * so the host can wake its net loop at once (dnsd: idx_serve_wake_fd pipe) */
+void dns_lazy_set_kick(void (*fn)(void));
+
 /* turn lazy mode on for this process (call once, before the threads start) */
 void dns_lazy_init(const DnsLazyConf *c);
 int  dns_lazy_enabled(void);
@@ -54,6 +58,8 @@ const DnsLazyConf *dns_lazy_conf(void);
  * (fresh or stale-while-revalidate); LOADING/FAILED = not servable yet.
  * *age_s (may be NULL) = seconds since the last successful fetch, -1 if none. */
 int  dns_lazy_want(const char *name, int *age_s);
+/* same, for a parked query's re-check (not counted again in hits/misses) */
+int  dns_lazy_want_recheck(const char *name, int *age_s);
 /* Read-only peek (no LRU touch, no fetch). */
 int  dns_lazy_peek(const char *name, int *age_s);
 /* Prefetch hook: queue a fetch now unless held fresh / loading. 1 queued. */

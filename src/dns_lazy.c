@@ -27,7 +27,15 @@ static struct {
     Ent            *t; uint32_t cap; int n, ndata; int64_t bytes;
     char            req[REQ_CAP][NAME_CAP]; int rh, rn;
     DnsLazyStats    st;
+    void          (*kick)(void);
+    int             kicked;           /* a fetch was queued under the lock: kick after unlock */
 } L = { .mu = PTHREAD_MUTEX_INITIALIZER };
+void dns_lazy_set_kick(void (*fn)(void)) { L.kick = fn; }
+static void unlock_kick(void) {
+    int k = L.kicked; L.kicked = 0;
+    pthread_mutex_unlock(&L.mu);
+    if (k && L.kick) L.kick();
+}
 
 #ifdef DNS_LAZY_TEST_CLOCK_MS
 int64_t DNS_LAZY_TEST_CLOCK_MS(void);
@@ -112,7 +120,7 @@ static void erase(Ent *e) {
 static void enqueue(Ent *e) {
     if (e->queued || L.rn >= REQ_CAP) return;
     snprintf(L.req[(L.rh + L.rn) % REQ_CAP], NAME_CAP, "%s", e->name);
-    L.rn++; e->queued = 1;
+    L.rn++; e->queued = 1; L.kicked = 1;
 }
 static int age_of(const Ent *e, int64_t now) {
     return e->has_data && e->fetched_ms ? (int)((now - e->fetched_ms) / 1000) : (e->has_data ? 0 : -1);
@@ -148,7 +156,7 @@ static int want(const char *name, int *age_s, int touch, int fetch) {
         }
     }
     int s = servable(e, now);
-    if (touch) {
+    if (touch == 1) {                    /* 2 = a parked query's re-check: not a new query */
         if (s == DNS_LAZY_READY) {
             L.st.hits++;
             int64_t ttl = (int64_t)(e->empty ? L.c.empty_ttl_s : L.c.ttl_s) * 1000;
@@ -156,10 +164,11 @@ static int want(const char *name, int *age_s, int touch, int fetch) {
         } else L.st.misses++;
     }
     if (age_s) *age_s = age_of(e, now);
-    pthread_mutex_unlock(&L.mu);
+    unlock_kick();
     return s;
 }
 int dns_lazy_want(const char *name, int *age_s) { return want(name, age_s, 1, 1); }
+int dns_lazy_want_recheck(const char *name, int *age_s) { return want(name, age_s, 2, 1); }
 int dns_lazy_peek(const char *name, int *age_s) {
     if (!L.on) { if (age_s) *age_s = -1; return DNS_LAZY_ABSENT; }
     int s = want(name, age_s, 0, 0);
@@ -185,7 +194,7 @@ int dns_lazy_prefetch(const char *name) {
             if (e->queued) { e->state = DNS_LAZY_LOADING; q = 1; }
         }
     }
-    pthread_mutex_unlock(&L.mu);
+    unlock_kick();
     return q;
 }
 void dns_lazy_invalidate(const char *name) {
