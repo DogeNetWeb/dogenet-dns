@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/socket.h>
 
 /* TCP DNS clients, served NON-BLOCKING from dnsd_core_poll so a slow, idle or
  * trickling client can never stall the UDP path. Zero-initialised = no client.
@@ -31,7 +32,21 @@ typedef struct {
     int64_t  born_ms, last_ms;         /* monotonic: accept time, last byte in/out */
     uint8_t  in[2 + DNSD_TCP_QMAX]; size_t in_len;
     uint8_t *out; size_t out_len, out_off;   /* pending length-prefixed answer */
+    int64_t  park_ms;                  /* LZ: head query parked until this (0 = none) */
 } DnsdTcpConn;
+
+/* LZ (lazy mode): a query whose zone is not fetched yet is PARKED (never
+ * answered NXDOMAIN/empty) until the zone is ready or lazy_wait_ms passes;
+ * then it gets the loading signal (SERVFAIL + EDE 14 "Not Ready"), or EDE 22
+ * when the last fetch found no verified answer. UDP parks live here. */
+#define DNSD_PARK_MAX  64
+#define DNSD_PARK_QMAX 600
+typedef struct {
+    int      used;
+    int64_t  deadline_ms;
+    struct sockaddr_storage cli; unsigned cl;
+    uint16_t qlen; uint8_t q[DNSD_PARK_QMAX];
+} DnsdPark;
 
 typedef struct {
     /* caller-owned read handles (open your own connections; WAL-safe) */
@@ -41,6 +56,11 @@ typedef struct {
     int         tls_redirect;       /* answer A=<ip> for DANE names */
     uint8_t     tls_redirect_ip[4];
     int         verbose;
+    /* LZ: lazy mode (dns_lazy_init done by the host). 0 = full mode, unchanged */
+    int         lazy;
+    int         lazy_wait_ms;       /* park a not-ready query up to this (<= 9000) */
+    unsigned long lazy_parked, lazy_loading_sent, lazy_failed_sent;
+    DnsdPark    park[DNSD_PARK_MAX];
     /* sockets (dnsd_core_bind) */
     int         ufd, tfd;           /* -1 when unbound / tcp unavailable */
     DnsdTcpConn tcp[DNSD_TCP_MAX];  /* live TCP clients (core-internal) */
@@ -62,5 +82,10 @@ void dnsd_core_close(DnsdCore *dc);
  * full response for `q` into out[cap]; over_tcp lifts the UDP budget. */
 size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
                         uint8_t *out, size_t cap, int over_tcp);
+/* LZ: the same, but in lazy mode a not-ready zone sets *not_ready to its
+ * DNS_LAZY_* state and returns 0 instead of answering (caller may park and
+ * retry; dnsd_core_answer never parks: it answers the loading signal). */
+size_t dnsd_core_answer_lazy(DnsdCore *dc, const dns_query *q,
+                             uint8_t *out, size_t cap, int over_tcp, int *not_ready);
 
 #endif

@@ -25,6 +25,7 @@
 #include "dns_state.h"
 #include "dns_chain.h"
 #include "dns_net.h"
+#include "dns_lazy.h"
 #include "dnsd_core.h"
 #include "dns_wire.h"
 #include "zone.h"
@@ -97,11 +98,82 @@ static void publish_zone_once(void) {
     fprintf(stderr, "dnsd: published %d/%d records for %s\n", ok, g_zone.n, g_apex);
 }
 
+/* LZ: NAMES page collector (one name per line, stops before the reply fills) */
+struct NamesAcc { char *buf; int off, cap, n; };
+static int names_cb(void *u, const char *nm) {
+    struct NamesAcc *a = u;
+    if (a->off + 40 >= a->cap) return 0;
+    a->off += snprintf(a->buf + a->off, (size_t)(a->cap - a->off), "%s\n", nm);
+    a->n++;
+    return 1;
+}
+
 /* ── control socket: live PUT/DEL/CLEAR/LIST/USAGE from dns-cli ──────────────── */
 static void ctl_dispatch(char *req, char *resp, int rmax) {
     req[strcspn(req, "\r\n")] = '\0';
     char cmd[16] = {0};
     if (sscanf(req, "%15s", cmd) != 1) { snprintf(resp, rmax, "-ERR empty\n"); return; }
+
+    /* ── LZ: lazy-mode status / prefetch / namespace list (read-only; no key) ── */
+    if (!strcasecmp(cmd, "LAZY")) {
+        DnsLazyStats ls; memset(&ls, 0, sizeof ls);
+        if (dns_lazy_enabled()) dns_lazy_stats(&ls);
+        int64_t h = 0, ph = 0; dns_chain_sync(g_ch, &h, &ph);
+        int peers = dnsnet_peers();
+        int synced = ph > 0 ? (h + 2 >= ph) : -1;          /* -1: no peer tip known yet */
+        snprintf(resp, rmax,
+                 "+OK lazy=%d ready=%d tip=%lld peer_tip=%lld ns_synced=%d peers=%d cached=%d bytes=%lld "
+                 "zready=%d loading=%d failed=%d queued=%d hits=%lu misses=%lu stale_served=%lu "
+                 "fetch_ok=%lu fetch_fail=%lu evicted=%lu forged=%lu stale_peer=%lu timeout=%lu\n",
+                 dns_lazy_enabled(), synced != 0 && peers > 0 && h > 0, (long long)h, (long long)ph, synced, peers,
+                 ls.names, (long long)ls.bytes, ls.ready, ls.loading, ls.failed, ls.queued, ls.hits, ls.misses,
+                 ls.stale_served, ls.fetch_ok, ls.fetch_fail, ls.evicted,
+                 dnsnet_counter("lz_forged"), dnsnet_counter("lz_stale"), dnsnet_counter("lz_timeout"));
+        return;
+    }
+    if (!strcasecmp(cmd, "ZONE") || !strcasecmp(cmd, "PREFETCH")) {
+        int pre = !strcasecmp(cmd, "PREFETCH");
+        const char *p = req + strlen(cmd);
+        static char body[16384];
+        int o = 0, nq = 0, seen = 0;
+        body[0] = '\0';
+        char nm[64];
+        while (sscanf(p, " %63s", nm) == 1 && seen < 64) {
+            p = strstr(p, nm) + strlen(nm); seen++;
+            for (char *c = nm; *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
+            size_t nl = strlen(nm);
+            if (nl > 5 && (!strcmp(nm + nl - 5, ".doge") || !strcmp(nm + nl - 5, ".pepe"))) nm[nl - 5] = '\0';
+            uint8_t own[20];
+            int valid = sp_name_valid(nm, strlen(nm));
+            int owned = valid && g_orc.owner_now(g_orc.u, nm, own);
+            int q = 0;
+            if (pre && owned) { q = dns_lazy_prefetch(nm); nq += q; }
+            int age = -1, st = owned ? dns_lazy_peek(nm, &age) : DNS_LAZY_ABSENT;
+            if (!dns_lazy_enabled() && owned) st = DNS_LAZY_READY;     /* full mode holds what it holds */
+            o += snprintf(body + o, sizeof body - (size_t)o, "%s owned=%d state=%s age=%d bytes=%lld%s\n", nm, owned,
+                          !valid ? "invalid" : !owned ? "unowned" : dns_lazy_state_name(st), age,
+                          owned ? (long long)sp_state_sum(g_st, nm) : 0LL, q ? " queued=1" : "");
+            if (o >= (int)sizeof body - 160) break;
+        }
+        if (!seen) { snprintf(resp, rmax, "-ERR usage: %s <name> [name...]\n", cmd); return; }
+        if (pre) snprintf(resp, rmax, "+OK queued=%d of %d\n%s", nq, seen, body);
+        else     snprintf(resp, rmax, "+OK %d\n%s", seen, body);
+        return;
+    }
+    if (!strcasecmp(cmd, "NAMES")) {
+        char pfx[40] = "", after[40] = ""; int lim = 200;
+        char a1[40] = "", a2[40] = "", a3[16] = "";
+        int na = sscanf(req, "%*s %39s %39s %15s", a1, a2, a3);
+        if (na >= 1 && strcmp(a1, "-")) snprintf(pfx, sizeof pfx, "%s", a1);
+        if (na >= 2 && strcmp(a2, "-")) snprintf(after, sizeof after, "%s", a2);
+        if (na >= 3) lim = atoi(a3);
+        if (lim < 1) lim = 1;
+        if (lim > 1000) lim = 1000;
+        struct NamesAcc acc = { resp, 0, rmax, 0 };
+        acc.off = snprintf(resp, rmax, "+OK names prefix=%s after=%s\n", pfx[0] ? pfx : "-", after[0] ? after : "-");
+        dns_chain_names(g_ch, pfx, after, lim, names_cb, &acc);
+        return;
+    }
 
     if (!strcasecmp(cmd, "LIST")) {
         if (!g_apex[0]) { snprintf(resp, rmax, "-ERR node has no --name\n"); return; }
@@ -169,7 +241,7 @@ static void ctl_dispatch(char *req, char *resp, int rmax) {
         }
         return;
     }
-    snprintf(resp, rmax, "-ERR unknown command '%s' (PUT|DEL|CLEAR|LIST|USAGE)\n", cmd);
+    snprintf(resp, rmax, "-ERR unknown command '%s' (PUT|DEL|CLEAR|LIST|USAGE|LAZY|ZONE|PREFETCH|NAMES)\n", cmd);
 }
 
 static void service_ctl(void) {
@@ -186,7 +258,7 @@ static void service_ctl(void) {
             if (memchr(req, '\n', (size_t)rl)) break;
         }
         req[rl] = '\0';
-        char resp[8192];
+        static char resp[65536];
         ctl_dispatch(req, resp, sizeof resp);
         (void)write(cfd, resp, strlen(resp));
         close(cfd);
@@ -325,6 +397,16 @@ static int usage(const char *p) {
         "  --ctl <path>       unix control socket for dns-cli (live updates)\n"
         "  --uplink-mbit <n>  L7 Pi profile: cap dn* gossip peers at n/0.52 [no cap]\n"
         "  --relay-credit-blocks <n>  L2: one relay credit per n blocks per name [10]\n"
+        "  --lazy             LAZY mode: sync the namespace only; fetch zones from\n"
+        "                     peers on demand, verify, cache (env DOGENET_LAZY=1)\n"
+        "  --lazy-cache-dir <dir>  lazy cache store = <dir>/lazy-zones.db (if no --store)\n"
+        "  --lazy-max-names <n>    cached zones kept, LRU beyond          [2048]\n"
+        "  --lazy-max-mb <n>       cached op bytes kept, LRU beyond (MiB) [8]\n"
+        "  --lazy-ttl <s>          fresh for s, then stale-while-revalidate [300]\n"
+        "  --lazy-empty-ttl <s>    same for a verified-empty zone          [60]\n"
+        "  --lazy-max-stale <s>    never serve older than s (refetch failing) [86400]\n"
+        "  --lazy-wait-ms <ms>     park a not-ready query this long, then\n"
+        "                          SERVFAIL + EDE 14 'Not Ready' (0..9000)  [3000]\n"
         "  -v                 verbose\n", p);
     return 2;
 }
@@ -333,6 +415,8 @@ int main(int argc, char **argv) {
     const char *db = NULL, *store = NULL, *keyarg = NULL, *name = NULL, *zonef = NULL;
     const char *dns_addr = "127.0.0.1", *ctl_path = NULL, *coin = "doge", *sync_peer = "auto";
     int dns_port = 5353, do_sync = 1;
+    int lazy = 0; const char *lazy_dir = NULL;                 /* LZ */
+    DnsLazyConf lc; dns_lazy_conf_default(&lc);
     uint16_t chain_port = 0;
     char peers[16][96]; int n_peers = 0;
 
@@ -371,10 +455,32 @@ int main(int argc, char **argv) {
             if (cb < 1 || cb > 1440) { fprintf(stderr, "bad --relay-credit-blocks '%s' (1..1440)\n", argv[i]); return 1; }
             dnsnet_set_credit_blocks(cb);
         }
+        else if (!strcmp(argv[i], "--lazy")) lazy = 1;
+        else if (!strcmp(argv[i], "--lazy-cache-dir") && i+1 < argc) lazy_dir = argv[++i];
+        else if (!strcmp(argv[i], "--lazy-max-names") && i+1 < argc) lc.max_names = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lazy-max-mb") && i+1 < argc) lc.max_bytes = (int64_t)atoi(argv[++i]) << 20;
+        else if (!strcmp(argv[i], "--lazy-ttl") && i+1 < argc) lc.ttl_s = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lazy-empty-ttl") && i+1 < argc) lc.empty_ttl_s = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lazy-max-stale") && i+1 < argc) lc.max_stale_s = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lazy-wait-ms") && i+1 < argc) lc.wait_ms = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v")) g_verbose = 1;
         else return usage(argv[0]);
     }
+    { const char *e = getenv("DOGENET_LAZY"); if (e && e[0] == '1') lazy = 1; }
+    static char lazy_store[1024];
+    if (lazy && !store && lazy_dir) {
+        snprintf(lazy_store, sizeof lazy_store, "%s/lazy-zones.db", lazy_dir);
+        store = lazy_store;
+    }
     if (!db || !store) return usage(argv[0]);
+    if (lazy) {
+        dns_lazy_init(&lc);
+        const DnsLazyConf *c = dns_lazy_conf();
+        g_core.lazy = 1; g_core.lazy_wait_ms = c->wait_ms;
+        fprintf(stderr, "dnsd: LAZY mode (namespace-only sync; zones fetched on demand) cache=%s "
+                "max_names=%d max_bytes=%lld ttl=%ds empty_ttl=%ds max_stale=%ds wait=%dms\n",
+                store, c->max_names, (long long)c->max_bytes, c->ttl_s, c->empty_ttl_s, c->max_stale_s, c->wait_ms);
+    }
 
     /* Overlay seeds ride the chain wire (idx_serve dial list). Omit --peer
        and a pep/doge node still finds the mesh; an explicit --peer replaces
@@ -399,6 +505,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         snprintf(g_apex, sizeof g_apex, "%s", name);
+        if (dns_lazy_enabled()) dns_lazy_pin(g_apex);     /* LZ: own zone: kept + offered */
     }
     if (zonef) {
         if (!name) { fprintf(stderr, "--zone needs --name\n"); return 1; }

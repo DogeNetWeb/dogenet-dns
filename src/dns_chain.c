@@ -165,3 +165,34 @@ int64_t dns_chain_epoch_start(DnsChain *c, const char *name) {
     sqlite3_reset(c->q_epoch);   /* release the read txn */
     return h;
 }
+
+int dns_chain_names(DnsChain *c, const char *prefix, const char *after, int limit,
+                    int (*cb)(void *u, const char *name), void *u) {
+    if (!c || limit <= 0) return 0;
+    int64_t mtp;
+    if (!oc_mtp(c, &mtp)) return 0;                  /* no block times: nothing is owned */
+    char lo[80], hi[80];
+    const char *pf = prefix ? prefix : "";
+    const char *af = after ? after : "";
+    snprintf(lo, sizeof lo, "%s", strcmp(af, pf) > 0 ? af : pf);
+    snprintf(hi, sizeof hi, "%s\x7f", pf);
+    sqlite3_stmt *q = NULL;
+    if (sqlite3_prepare_v2(c->db,
+            "SELECT name FROM names WHERE name >= ?1 AND name < ?2 AND name <> ?3 "
+            "AND lease_expiry > ?4 AND length(owner) = 20 ORDER BY name LIMIT ?5", -1, &q, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(q, 1, lo, -1, SQLITE_STATIC);
+    sqlite3_bind_text(q, 2, hi, -1, SQLITE_STATIC);
+    sqlite3_bind_text(q, 3, af, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(q, 4, mtp);
+    sqlite3_bind_int(q, 5, limit);
+    int n = 0;
+    while (sqlite3_step(q) == SQLITE_ROW) {
+        const char *nm = (const char *)sqlite3_column_text(q, 0);
+        if (!nm) continue;
+        n++;
+        if (!cb(u, nm)) break;
+    }
+    sqlite3_finalize(q);
+    return n;
+}

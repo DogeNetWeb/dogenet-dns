@@ -242,6 +242,28 @@ int dns_resp_add_opt(dns_resp *r, uint16_t udp_payload)
     return 0;
 }
 
+int dns_resp_add_opt_ede(dns_resp *r, uint16_t udp_payload, uint16_t info_code, const char *text)
+{
+    if (!r->ok) return -1;
+    size_t tl = text ? strlen(text) : 0;
+    if (tl > 200) tl = 200;
+    size_t need = 11 + 4 + 2 + tl;
+    if (r->len + need > r->cap) return -1;
+    uint8_t *p = r->buf + r->len;
+    p[0] = 0x00;
+    put16(p + 1, 41);                  /* TYPE = OPT */
+    put16(p + 3, udp_payload);
+    put32(p + 5, 0);
+    put16(p + 9, (uint16_t)(4 + 2 + tl));   /* RDLEN */
+    put16(p + 11, 15);                 /* OPTION-CODE = EDE (RFC 8914) */
+    put16(p + 13, (uint16_t)(2 + tl)); /* OPTION-LENGTH */
+    put16(p + 15, info_code);
+    if (tl) memcpy(p + 17, text, tl);
+    r->len += need;
+    r->arcount++;
+    return 0;
+}
+
 size_t dns_resp_finish(dns_resp *r)
 {
     if (!r->ok) return 0;

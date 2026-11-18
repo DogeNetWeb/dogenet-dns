@@ -9,6 +9,7 @@
 
 #include "dogenet/wire.h"
 #include "dogenet/crypto.h"
+#include "dns_lazy.h"
 
 #define MAX_PEERS   64
 #define HOLD_SLOTS  64
@@ -181,6 +182,10 @@ typedef struct {
     unsigned       good, bad;
     time_t         use_half_at;
     int            lowprio, kick, kicked;
+    /* LZ: lazy-fetch per-peer score (local only) */
+    int            lz_inflight;
+    unsigned       lz_ok, lz_fail, lz_bad, lz_stale;
+    int64_t        lz_backoff_ms;
 } Peer;
 
 typedef struct {
@@ -196,7 +201,9 @@ typedef struct {
     X(relay) X(relay_l0) X(relay_l1) X(relay_l2) X(relay_l3) X(relay_l4) \
     X(credit_wait) X(nr_evict) X(nr_evict_young) X(get_hi) X(inv_wait) X(drain_wait) \
     X(zdat_ops) X(l5_skip) X(admit_calls) X(admit_new) X(admit_dup) X(batch) X(batch_fail) \
-    X(in_drop) X(useless) X(useful) X(lowprio) X(kick) X(peer_capped)
+    X(in_drop) X(useless) X(useful) X(lowprio) X(kick) X(peer_capped) \
+    X(lz_fetch) X(lz_ask) X(lz_ok) X(lz_fail) X(lz_forged) X(lz_stale) X(lz_timeout) X(lz_evict) \
+    X(lz_inv_skip) X(lz_dat_skip)
 
 static struct {
     SpState      *st;
@@ -211,6 +218,7 @@ static struct {
     uint64_t      ann_head[LANES];
     uint32_t      blk;                       /* L2: monotonic max-seen tip height */
     int           min_wait_lane;             /* L3: best lane still waiting for a peer */
+    int           lazy;                      /* LZ: lazy (namespace-only) mode */
     struct {                                  /* counters for the 10-min line */
 #define X(n) unsigned long n;
         COUNTERS(X)
@@ -332,6 +340,8 @@ static int noop_reply_ok(const Peer *from, const char *name) {
 static int noop_reply_ok(const Peer *from, const char *name) { (void)from; (void)name; return 1; }
 #endif
 
+static int  lz_adopt_cb(void *u, const char *name);
+static void lz_evict(void);
 void dnsnet_init(SpState *st, SpChainOracle oracle, int verbose) {
     memset(&g, 0, sizeof g);
 #if DNSNET_RL_SLOTS > 0
@@ -355,6 +365,11 @@ void dnsnet_init(SpState *st, SpChainOracle oracle, int verbose) {
     g.blk = g.o.tip ? g.o.tip(g.o.u) : 0;     /* L2: restart = every name at its burst */
     g.next_log = time(NULL) + 600;
     dns_state_cache_attach(st);               /* L10 */
+    g.lazy = dns_lazy_enabled();
+    if (g.lazy) {                             /* LZ: a restart keeps its cache */
+        sp_state_names(st, lz_adopt_cb, NULL);
+        lz_evict();
+    }
 }
 
 void dnsnet_set_seniority(int (*fn)(const char *name)) { g.senior = fn; }
@@ -570,7 +585,9 @@ static int page_cb(void *u, const char *name) {
     if (pa->a->count == 0 && !inv_room(pa->p, INV_FRAME)) {
         pa->stop = 1; g.c.out_wait++; return 0;
     }
-    inv_add(pa->a, name);
+    /* LZ: a lazy node offers only its own (pinned) names: its cache is the
+     * user's browsing, and every full peer already holds those zones */
+    if (!g.lazy || dns_lazy_pinned(name)) inv_add(pa->a, name);
     snprintf(pa->p->ae_cursor, sizeof pa->p->ae_cursor, "%s", name);
     pa->left--; g.c.ae_names++;
     return 1;
@@ -1036,7 +1053,8 @@ static void hold_service(void) {
         if (rc == -2) continue;             /* still ahead — keep holding */
         if (rc == 1 && parsed) {
             admit_debit(name, &p, g.hold[i].len);
-            dnsnet_announce(name);
+            if (!g.lazy || dns_lazy_pinned(name)) dnsnet_announce(name);
+            if (g.lazy) dns_lazy_bytes(name, sp_state_sum(g.st, name));
         }
         g.hold[i].len = 0;                  /* admitted / rejected / dup — done */
     }
@@ -1091,6 +1109,247 @@ static void use_note(Peer *p, int useful) {
         p->kick = 1;                                   /* acted on in dnsnet_tick */
 }
 
+/* ── LZ: lazy (namespace-only) mode — on-demand zone fetch ───────────────────
+ * A query for an owned name whose zone we do not hold queues a fetch
+ * (dns_lazy.c). Here, on the net thread, a fetch asks LZ_FANOUT peers with the
+ * EXISTING dnzget (the same frame a full node's pull sends; an old node
+ * answers it with its dnzdat exactly as it answers any pull, an empty dump if
+ * it holds nothing). The answer is admitted by the unchanged on_zdat path, so
+ * every op passes sp_state_admit: signature by the namespace's CURRENT owner
+ * (lease-gated) or its §2.2 DNS_SCOPE hot key, the anchor's header hash on our
+ * chain, the per-key anchor order and the 8 KB budget. Forged ops never land.
+ *
+ * Freshness/withholding: there is no zone commitment on chain (gap G3), so a
+ * single peer can serve an OLD but validly signed set, or nothing. A fetch
+ * therefore merges answers from up to LZ_QUORUM peers (LWW: the newest op per
+ * key wins, so ONE honest peer among them is enough), and waits LZ_SETTLE_MS
+ * after the first answer for the others. A peer whose answer differs from the
+ * merged result (stale / withheld) gets a short backoff; a peer whose ops fail
+ * verification gets an exponential one; a timeout asks the next peer.
+ * Backoffs only order which peers we ask (we still ask a backed-off peer when
+ * it is the only one left) — local policy, nothing on the wire, same spirit as
+ * L6 (answers to our own requests are never scored as spam). */
+#ifndef LZ_FANOUT
+#define LZ_FANOUT        2        /* peers asked at once */
+#endif
+#ifndef LZ_QUORUM
+#define LZ_QUORUM        2        /* agreeing-or-merged valid answers that end a fetch */
+#endif
+#ifndef LZ_ASK_MAX
+#define LZ_ASK_MAX       6        /* peers one fetch may try */
+#endif
+#ifndef LZ_SLOTS
+#define LZ_SLOTS         64       /* fetches in flight */
+#endif
+#ifndef LZ_PER_PEER
+#define LZ_PER_PEER      16       /* lazy zgets in flight to one peer */
+#endif
+#ifndef LZ_ASK_TIMEOUT_MS
+#define LZ_ASK_TIMEOUT_MS 2000    /* one peer's answer */
+#endif
+#ifndef LZ_SETTLE_MS
+#define LZ_SETTLE_MS     600      /* after the first valid answer, wait this for the rest */
+#endif
+#ifndef LZ_FETCH_MAX_MS
+#define LZ_FETCH_MAX_MS  8000     /* no valid answer by then: FAILED (retry later) */
+#endif
+
+typedef struct { uint8_t x[16]; uint32_t n; } LzSum;   /* order-free op-set sum */
+static void lz_sum_add(LzSum *s, const uint8_t id[32]) {
+    for (int i = 0; i < 16; i++) s->x[i] ^= id[i];
+    s->n++;
+}
+enum { LZA_SENT = 1, LZA_OK, LZA_BAD, LZA_TIMEOUT };
+typedef struct {
+    char    name[SP_NAME_MAX + 1];
+    int64_t start_ms, first_ok_ms;
+    int     nask, ok_n;
+    struct { Peer *p; uint32_t gen; int64_t sent_ms; int st; LzSum sum; } ask[LZ_ASK_MAX];
+} LzFetch;
+static LzFetch g_lz[LZ_SLOTS];
+
+static int lz_adopt_cb(void *u, const char *name) {
+    (void)u;
+    dns_lazy_adopt(name, sp_state_sum(g.st, name));
+    return 1;
+}
+static void lz_evict(void) {
+    char v[64]; int r;
+    while ((r = dns_lazy_evict_one(v)) != 0)
+        if (r == 1) { sp_state_drop_name(g.st, v); g.c.lz_evict++; }
+}
+static LzFetch *lz_find(const char *name) {
+    for (int i = 0; i < LZ_SLOTS; i++) if (g_lz[i].name[0] && !strcmp(g_lz[i].name, name)) return &g_lz[i];
+    return NULL;
+}
+static int lz_outstanding(const LzFetch *f) {
+    int k = 0;
+    for (int i = 0; i < f->nask; i++) if (f->ask[i].st == LZA_SENT) k++;
+    return k;
+}
+static int lz_asked(const LzFetch *f, const Peer *p) {
+    for (int i = 0; i < f->nask; i++) if (f->ask[i].p == p && f->ask[i].gen == p->gen) return 1;
+    return 0;
+}
+/* the best peer not yet asked for this fetch; NULL if none can take it now */
+static Peer *lz_pick(const LzFetch *f, int64_t now) {
+    Peer *best = NULL; int64_t bs = 0;
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *p = &g.peers[i];
+        if (!p->used || lz_asked(f, p) || p->lz_inflight >= LZ_PER_PEER) continue;
+        if (!out_room(p, 24 + 1 + SP_NAME_MAX)) continue;
+        int64_t sc = (int64_t)p->lz_bad * 64 + (int64_t)p->lz_fail * 8 + (int64_t)p->lz_stale * 2
+                   + (p->lz_backoff_ms > now ? 1000000 : 0) + (p->lowprio ? 4096 : 0)
+                   + (int64_t)p->lz_inflight;
+        sc = sc * 16 + (int64_t)(rnd64() & 15);            /* random tie-break */
+        if (!best || sc < bs) { best = p; bs = sc; }
+    }
+    return best;
+}
+static int lz_can_ask_more(const LzFetch *f, int64_t now) {
+    return f->nask < LZ_ASK_MAX && lz_pick(f, now) != NULL;
+}
+static int lz_ask(LzFetch *f, int64_t now) {
+    if (f->nask >= LZ_ASK_MAX) return 0;
+    Peer *p = lz_pick(f, now);
+    if (!p) return 0;
+    send_zget(p, f->name);
+    p->lz_inflight++; g.c.lz_ask++;
+    f->ask[f->nask].p = p; f->ask[f->nask].gen = p->gen; f->ask[f->nask].sent_ms = now;
+    f->ask[f->nask].st = LZA_SENT; memset(&f->ask[f->nask].sum, 0, sizeof f->ask[0].sum);
+    f->nask++;
+    return 1;
+}
+static void lz_backoff(Peer *p, int64_t base_ms, unsigned n, int64_t cap_ms, int64_t now) {
+    int64_t b = base_ms;
+    for (unsigned i = 1; i < n && b < cap_ms; i++) b *= 2;
+    if (b > cap_ms) b = cap_ms;
+    if (now + b > p->lz_backoff_ms) p->lz_backoff_ms = now + b;
+}
+/* the held op-set sum of a name (clear + rows), to judge each answer */
+static int lz_held_cb(void *u, const uint8_t *key, int klen, int op, uint32_t anchor, const uint8_t *blob, int blen) {
+    (void)key; (void)klen; (void)op; (void)anchor;
+    SpStateOp p;
+    if (sp_state_op_parse(blob, blen, &p)) lz_sum_add(u, p.op_id);
+    return 1;
+}
+static void lz_held_sum(const char *name, LzSum *s) {
+    memset(s, 0, sizeof *s);
+    uint8_t *cb; int cl;
+    if (sp_state_clear_get(g.st, name, &cb, &cl)) {
+        SpStateOp p;
+        if (sp_state_op_parse(cb, cl, &p)) lz_sum_add(s, p.op_id);
+        free(cb);
+    }
+    sp_state_iter(g.st, name, lz_held_cb, s);
+}
+static void lz_finish(LzFetch *f, int ok, int64_t now) {
+    if (ok) {
+        LzSum held; lz_held_sum(f->name, &held);
+        for (int i = 0; i < f->nask; i++) {
+            Peer *p = f->ask[i].p;
+            if (f->ask[i].st != LZA_OK || !p->used || p->gen != f->ask[i].gen) continue;
+            if (memcmp(&f->ask[i].sum, &held, sizeof held)) {       /* behind / withheld */
+                p->lz_stale++; g.c.lz_stale++;
+                lz_backoff(p, 10000, 1, 10000, now);
+            } else { p->lz_ok++; if (p->lz_fail) p->lz_fail--; }
+        }
+        int64_t bytes = sp_state_sum(g.st, f->name);
+        dns_lazy_done(f->name, 1, bytes, held.n == 0);
+        g.c.lz_ok++;
+    } else {
+        dns_lazy_done(f->name, 0, 0, 0);
+        g.c.lz_fail++;
+    }
+    for (int i = 0; i < f->nask; i++)                       /* free the per-peer seats */
+        if (f->ask[i].st == LZA_SENT && f->ask[i].p->gen == f->ask[i].gen && f->ask[i].p->lz_inflight > 0)
+            f->ask[i].p->lz_inflight--;
+    f->name[0] = '\0';
+    lz_evict();
+}
+/* an answer for a name we track arrived; 1 = it answers one of our fetch asks */
+static int lz_on_dat(Peer *from, const char *name, int ops, int rejected, int pending, const LzSum *sum) {
+    LzFetch *f = lz_find(name);
+    if (!f) return 0;
+    int64_t now = now_ms();
+    for (int i = 0; i < f->nask; i++) {
+        if (f->ask[i].p != from || f->ask[i].gen != from->gen || f->ask[i].st != LZA_SENT) continue;
+        if (from->lz_inflight > 0) from->lz_inflight--;
+        if (rejected > 0) {                                  /* forged / unverifiable ops */
+            from->lz_bad++; g.c.lz_forged++;
+            lz_backoff(from, 30000, from->lz_bad, 600000, now);
+        }
+        if (rejected > 0 && ops - rejected <= 0 && !pending) {
+            f->ask[i].st = LZA_BAD;                          /* nothing usable: ask another */
+            lz_ask(f, now);
+        } else {
+            f->ask[i].st = LZA_OK; f->ask[i].sum = *sum;
+            /* rejected ops do not count toward the peer's set */
+            if (rejected > 0) f->ask[i].sum.n = UINT32_MAX;
+            f->ok_n++;
+            if (!f->first_ok_ms) f->first_ok_ms = now;
+        }
+        return 1;
+    }
+    return 0;
+}
+static void lz_peer_down(Peer *p) {
+    for (int s = 0; s < LZ_SLOTS; s++) {
+        LzFetch *f = &g_lz[s];
+        if (!f->name[0]) continue;
+        for (int i = 0; i < f->nask; i++)
+            if (f->ask[i].p == p && f->ask[i].gen == p->gen && f->ask[i].st == LZA_SENT)
+                f->ask[i].st = LZA_TIMEOUT;                  /* lz_service asks another */
+    }
+    p->lz_inflight = 0;
+}
+static void lz_service(int64_t now) {
+    /* start queued fetches */
+    char nm[64];
+    for (int budget = 64; budget > 0; budget--) {
+        LzFetch *fr = NULL;
+        for (int i = 0; i < LZ_SLOTS && !fr; i++) if (!g_lz[i].name[0]) fr = &g_lz[i];
+        if (!fr) break;
+        if (!dns_lazy_pop_request(nm)) break;
+        if (!sp_name_valid(nm, strlen(nm)) || lz_find(nm)) continue;
+        memset(fr, 0, sizeof *fr);
+        snprintf(fr->name, sizeof fr->name, "%s", nm);
+        fr->start_ms = now;
+        dns_lazy_begin(nm); g.c.lz_fetch++;
+        for (int k = 0; k < LZ_FANOUT; k++) if (!lz_ask(fr, now)) break;
+    }
+    /* drive fetches in flight */
+    for (int s = 0; s < LZ_SLOTS; s++) {
+        LzFetch *f = &g_lz[s];
+        if (!f->name[0]) continue;
+        for (int i = 0; i < f->nask; i++) {
+            if (f->ask[i].st != LZA_SENT) continue;
+            Peer *p = f->ask[i].p;
+            if (!p->used || p->gen != f->ask[i].gen) { f->ask[i].st = LZA_TIMEOUT; continue; }
+            if (now - f->ask[i].sent_ms >= LZ_ASK_TIMEOUT_MS) {
+                f->ask[i].st = LZA_TIMEOUT; g.c.lz_timeout++;
+                if (p->lz_inflight > 0) p->lz_inflight--;
+                p->lz_fail++;
+                lz_backoff(p, 2000, p->lz_fail, 120000, now);
+            }
+        }
+        int out = lz_outstanding(f);
+        /* keep LZ_FANOUT asks open until we have a quorum of valid answers */
+        while (f->ok_n + out < LZ_QUORUM && lz_ask(f, now)) out++;
+        int more = lz_can_ask_more(f, now);
+        if (f->ok_n >= LZ_QUORUM ||
+            (f->ok_n >= 1 && out == 0 && !more) ||
+            (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS && out == 0) ||
+            (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS + LZ_ASK_TIMEOUT_MS)) {
+            lz_finish(f, 1, now);
+        } else if (now - f->start_ms >= LZ_FETCH_MAX_MS) {
+            lz_finish(f, f->ok_n > 0, now);
+        } else if (f->ok_n == 0 && out == 0 && f->nask >= LZ_ASK_MAX) {
+            lz_finish(f, 0, now);                            /* everyone tried, nothing valid */
+        }
+    }
+}
+
 /* ── receive ─────────────────────────────────────────────────────────────────── */
 static void on_zinv(Peer *from, const uint8_t *pay, int n) {
     int off = 0; uint64_t count;
@@ -1105,6 +1364,7 @@ static void on_zinv(Peer *from, const uint8_t *pay, int n) {
         memcpy(name, pay + off, (size_t)nlen); name[nlen] = '\0'; off += nlen;
         const uint8_t *their = pay + off; off += 32;
         if (!sp_name_valid(name, (size_t)nlen)) continue;
+        if (g.lazy && !dns_lazy_tracked(name)) { g.c.lz_inv_skip++; continue; }   /* LZ */
         uint8_t ours[32];
         dns_state_digest(g.st, name, ours);
         if (memcmp(ours, their, 32) != 0) pull_want(from, name, their, now, fresh);
@@ -1133,7 +1393,10 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
     if (!sp_name_valid(name, (size_t)nlen)) return;
     uint64_t count;
     if (!sp_rvar(pay, n, &off, &count) || count > 1024) return;
-    int changed = 0, deferred = 0, held = 0, ops = 0, batched = 0, tried = 0;
+    /* LZ: a lazy node stores only names it is fetching or already caches */
+    if (g.lazy && !dns_lazy_tracked(name)) { g.c.lz_dat_skip++; return; }
+    int changed = 0, deferred = 0, held = 0, ops = 0, batched = 0, tried = 0, rejected = 0;
+    LzSum sum; memset(&sum, 0, sizeof sum);
     time_t retry_at = 0;
     char err[128];
     for (uint64_t i = 0; i < count; i++) {
@@ -1143,8 +1406,9 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
         /* the frame's name must match the op's (one name per dump) */
         SpStateOp p;
         if (!sp_state_op_parse(op, (int)ol, &p) ||
-            p.name_len != nlen || memcmp(p.name, name, (size_t)nlen) != 0) continue;
+            p.name_len != nlen || memcmp(p.name, name, (size_t)nlen) != 0) { rejected++; continue; }
         ops++; g.c.zdat_ops++;
+        lz_sum_add(&sum, p.op_id);
         if (!op_is_new(name, &p)) { g.c.l5_skip++; continue; }   /* L5: unchanged op: skip */
         time_t ra = 0;
         if (!admit_gate(name, &p, (int)ol, &ra)) {       /* P4: later, not never */
@@ -1157,21 +1421,26 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
         if (rc == 1) { changed = 1; g.c.admit_new++; admit_debit(name, &p, (int)ol); }
         else if (rc == -1) g.c.admit_dup++;
         else if (rc == -2) { held = 1; hold_push(op, (int)ol); }
-        else if (rc == 0 && g.verbose)
-            fprintf(stderr, "dnsnet: reject %s: %s\n", name, err);
+        else if (rc == 0) {
+            rejected++;
+            if (g.verbose) fprintf(stderr, "dnsnet: reject %s: %s\n", name, err);
+        }
     }
     if (batched && !sp_state_batch_end(g.st)) { g.c.batch_fail++; changed = 0; }
     /* L6: only an UNSOLICITED dump that taught us nothing counts against the
      * peer — an answer to our own zget costs what our P3 pull rate allows,
      * and an honest stale peer answering it must never be scored down. */
+    int lz_asked = g.lazy && lz_on_dat(from, name, ops, rejected, deferred || held, &sum);
     { PullSlot *ps = pull_find(name, 0);
-      int solicited = ps && ps->inflight == from;
+      int solicited = (ps && ps->inflight == from) || lz_asked;
       if (from->used) use_note(from, changed ? 1 : (!solicited && ops > 0 && !deferred && !held) ? -1 : 0); }
     pull_done(from, name, deferred, time(NULL), retry_at);
     if (changed) {
         /* announce to everyone — including the source: if we also hold ops it
-         * lacked, its digest now mismatches ours and it pulls back. */
-        dnsnet_announce(name);
+         * lacked, its digest now mismatches ours and it pulls back.
+         * LZ: a lazy node relays only its own names (privacy; see ae_page) */
+        if (!g.lazy || dns_lazy_pinned(name)) dnsnet_announce(name);
+        if (g.lazy) dns_lazy_bytes(name, sp_state_sum(g.st, name));
     } else if (!deferred) {
         /* nothing new for us — the source may be the stale side. Answer with
          * OUR digest for the name (cheap, idempotent); the source zgets from
@@ -1181,6 +1450,7 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
         if (noop_reply_ok(from, name)) send_inv_one(from, name);
     }
 }
+
 
 /* ── the IdxMeshHooks mirror ─────────────────────────────────────────────────── */
 void *dnsnet_up(void *peer, dnsnet_send_fn send) {
@@ -1234,6 +1504,7 @@ void dnsnet_down(void *handle) {
         }
         if (!s->nalt && !s->inflight && !s->not_before) pull_free(s);
     }
+    lz_peer_down(p);
     p->used = 0; p->peer = NULL; p->send = NULL; p->sq_n = 0; p->sqh_n = 0; p->inflight = 0;
 }
 
@@ -1292,6 +1563,7 @@ void dnsnet_tick(void) {
         g.pull_kick = 0; g.last_pull_ms = ms;
         pull_service(now);
     }
+    if (g.lazy) lz_service(ms);                     /* LZ: on-demand fetches */
     if (now != g.last_scan) {                     /* table scans: once a second */
         g.last_scan = now;
         blk_observe();

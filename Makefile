@@ -46,7 +46,7 @@ IDX_SRC    := $(addprefix $(IDXSRC)/,attrib.c adapter.c oracle_feed.c db.c chain
 MESH_SRC   := $(addprefix $(MESHDIR)/src/,crypto.c view.c wire.c state.c)
 # the DNS overlay + the dnsd driver
 DNS_SRC    := src/dns_state.c src/dns_chain.c src/dns_net.c src/zone.c \
-              src/dns_wire.c src/dnsd_core.c src/dnsd.c
+              src/dns_wire.c src/dnsd_core.c src/dnsd.c src/dns_lazy.c
 
 INC_IDX  := -I$(IDXSRC) -I$(SECP_I) -I$(SMDIR)
 INC_MESH := -I$(MESHDIR)/include -I$(SMDIR)
@@ -90,7 +90,7 @@ dns-cli: src/dns-cli.c
 # fake chain oracle — not the chain-wire node. Links the shared mesh's prebuilt
 # lib (it bundles sp_state + the hash/secp shim), same as the old codec tests.
 NETLIB   := $(MESHDIR)/libdogenetnet.a
-TEST_SRC := test/state_dns_test.c src/dns_state.c src/dns_net.c src/zone.c src/dns_wire.c
+TEST_SRC := test/state_dns_test.c src/dns_state.c src/dns_net.c src/zone.c src/dns_wire.c src/dns_lazy.c
 INC_TEST := -Isrc -I$(MESHDIR)/include
 
 $(NETLIB):
@@ -120,7 +120,7 @@ clean:
 # indexer's vendored secp), never the indexer sources.
 WIRE_SRC := test/wire_test.c src/dns_wire.c
 ZONE_SRC := test/zone_test.c src/zone.c src/dns_wire.c src/dns_state.c
-CORE_SRC := test/dnsd_core_test.c src/dnsd_core.c src/dns_state.c src/zone.c src/dns_wire.c
+CORE_SRC := test/dnsd_core_test.c src/dnsd_core.c src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c
 
 wire_test: $(WIRE_SRC) $(wildcard src/*.h)
 	$(CC) $(CFLAGS) -Isrc -o $@ $(WIRE_SRC)
@@ -161,7 +161,7 @@ clean-tests:
 #
 #   make check-gossip     peer table, hostile frames, 200k-mutation fuzz,
 #                         inv/get/dat semantics, the hold queue, convergence
-NET_SRC := test/net_test.c src/dns_net.c src/dns_state.c src/zone.c src/dns_wire.c
+NET_SRC := test/net_test.c src/dns_net.c src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c
 
 net_test: $(NET_SRC) $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
 	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(NET_SRC) $(NETLIB) $(IDXSECP) -lsqlite3
@@ -175,7 +175,7 @@ check-gossip: net_test
 # faked time()) — a patched pair, and both mixed pairs (one side built with
 # DNSNET_RL_SLOTS=0, i.e. today's behaviour). Wire-neutral rate limit.
 LOOP_REN = $(foreach f,init up msg down tick announce peers set_seniority set_credit_blocks credit_phase set_peer_cap peer_cap_for_uplink set_transport counter,-Ddnsnet_$(f)=$(1)_dnsnet_$(f))
-LOOP_LIB = test/loop_test.c src/dns_state.c src/zone.c src/dns_wire.c $(NETLIB) $(IDXSECP) -lsqlite3
+LOOP_LIB = test/loop_test.c src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c $(NETLIB) $(IDXSECP) -lsqlite3
 define LOOP_BIN
 $(1): test/loop_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
 	@mkdir -p build/loop
@@ -204,7 +204,7 @@ dns_chain_test: test/dns_chain_test.c src/dns_chain.c src/dns_chain.h
 # local anti-spam limits (P1-P4, P6-P8, P10, P11, G1) on a fake clock
 antispam_test: test/antispam_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
 	$(CC) $(CFLAGS) $(INC_TEST) -Dtime=ft_time -DDNSNET_TEST_CLOCK_MS=ft_ms -c src/dns_net.c -o build/antispam_dns_net.o
-	$(CC) $(CFLAGS) $(INC_TEST) -o $@ test/antispam_test.c build/antispam_dns_net.o src/dns_state.c src/zone.c src/dns_wire.c $(NETLIB) $(IDXSECP) -lsqlite3
+	$(CC) $(CFLAGS) $(INC_TEST) -o $@ test/antispam_test.c build/antispam_dns_net.o src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c $(NETLIB) $(IDXSECP) -lsqlite3
 
 check-antispam: antispam_test
 	./antispam_test
@@ -216,9 +216,21 @@ check-antispam: antispam_test
 p2p_test: test/p2p_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(INC_TEST) -Dtime=ft_time -DDNSNET_TEST_CLOCK_MS=ft_ms -c src/dns_net.c -o build/p2p_dns_net.o
-	$(CC) $(CFLAGS) $(INC_TEST) -o $@ test/p2p_test.c build/p2p_dns_net.o src/dns_state.c src/zone.c src/dns_wire.c $(NETLIB) $(IDXSECP) -lsqlite3
+	$(CC) $(CFLAGS) $(INC_TEST) -o $@ test/p2p_test.c build/p2p_dns_net.o src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c $(NETLIB) $(IDXSECP) -lsqlite3
 
 check-p2p: p2p_test
 	./p2p_test
 
 .PHONY: check-p2p
+
+# LZ: lazy (namespace-only) mode — dns_lazy table + dnsd_core lazy answers, fake clock
+LAZY_SRC := test/lazy_test.c src/dnsd_core.c src/dns_state.c src/zone.c src/dns_wire.c
+lazy_test: $(LAZY_SRC) src/dns_lazy.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(INC_TEST) -DDNS_LAZY_TEST_CLOCK_MS=lz_clock -c src/dns_lazy.c -o build/lazy_dns_lazy.o
+	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(LAZY_SRC) build/lazy_dns_lazy.o $(NETLIB) $(IDXSECP) -lsqlite3 -lpthread
+
+check-lazy: lazy_test
+	./lazy_test
+
+.PHONY: check-lazy

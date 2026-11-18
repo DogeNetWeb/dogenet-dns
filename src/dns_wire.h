@@ -96,6 +96,11 @@ int dns_resp_add(dns_resp *r, const char *owner, uint16_t type,
  * max UDP payload. Call after all answers, before finish. */
 int dns_resp_add_opt(dns_resp *r, uint16_t udp_payload);
 
+/* Same OPT RR carrying one RFC 8914 Extended DNS Error option (code 15):
+ * info_code ‖ UTF-8 extra text (may be NULL/""). Only for EDNS0 queries. */
+enum { DNS_EDE_NOT_READY = 14, DNS_EDE_NO_REACHABLE_AUTHORITY = 22 };
+int dns_resp_add_opt_ede(dns_resp *r, uint16_t udp_payload, uint16_t info_code, const char *text);
+
 /* Patch ANCOUNT/ARCOUNT (and TC if truncated) into the header. Returns the final
  * message length, or 0 if the build overflowed the hard buffer. */
 size_t dns_resp_finish(dns_resp *r);

@@ -3,6 +3,7 @@
 #include "dnsd_core.h"
 #include "dns_wire.h"
 #include "dogenet/crypto.h"
+#include "dns_lazy.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -53,9 +54,21 @@ static void resp_start(dns_resp *r, uint8_t *out, size_t cap, size_t limit,
 /* Build the full response for `q` into out[cap]. `over_tcp` lifts the 512/EDNS
  * UDP budget to the whole buffer (TCP has no such limit). Returns the response
  * length (a well-formed query always yields at least a header+question). */
+static size_t answer(DnsdCore *dc, const dns_query *q, uint8_t *out, size_t cap,
+                     int over_tcp, int *not_ready);
 size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
                         uint8_t *out, size_t cap, int over_tcp) {
+    return answer(dc, q, out, cap, over_tcp, NULL);
+}
+size_t dnsd_core_answer_lazy(DnsdCore *dc, const dns_query *q,
+                             uint8_t *out, size_t cap, int over_tcp, int *not_ready) {
+    *not_ready = 0;
+    return answer(dc, q, out, cap, over_tcp, not_ready);
+}
+static size_t answer(DnsdCore *dc, const dns_query *q, uint8_t *out, size_t cap,
+                     int over_tcp, int *not_ready) {
     dns_resp r;
+    int ede = -1; const char *ede_txt = NULL;
     size_t budget;
     if (over_tcp)      budget = cap;
     else if (q->edns)  budget = q->udp_payload < 512 ? 512
@@ -87,6 +100,33 @@ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
         fprintf(stderr, "query %s → apex=%s sub=%s owned=%d edns=%d tcp=%d\n",
                 q->qname, apex, sub[0] ? sub : "@", owned, q->edns, over_tcp);
     if (!owned) { resp_start(&r, out, cap, limit, q, DNS_RCODE_NXDOMAIN); goto done; }
+
+    /* LZ: an owned name's zone may not be here yet. Never NXDOMAIN/empty for
+     * it: serve only a verified fetched zone, else park or signal loading. */
+    if (dc->lazy && dns_lazy_enabled()) {
+        int age = -1, ls = dns_lazy_want(apex, &age);
+        if (ls == DNS_LAZY_READY) {
+            uint8_t held[20];                 /* rows of a PREVIOUS owner: re-fetch */
+            if (sp_state_owner(dc->st, apex, held) && memcmp(held, owner, 20) != 0) {
+                dns_lazy_invalidate(apex);
+                ls = dns_lazy_want(apex, &age);
+            }
+        }
+        if (ls != DNS_LAZY_READY) {
+            if (not_ready) { *not_ready = ls; return 0; }
+            resp_start(&r, out, cap, limit, q, DNS_RCODE_SERVFAIL);
+            if (ls == DNS_LAZY_FAILED) {
+                ede = DNS_EDE_NO_REACHABLE_AUTHORITY;
+                ede_txt = "dogenet-lazy: zone fetch failed (no verified answer from any peer); retrying";
+                dc->lazy_failed_sent++;
+            } else {
+                ede = DNS_EDE_NOT_READY;
+                ede_txt = "dogenet-lazy: zone loading; retry";
+                dc->lazy_loading_sent++;
+            }
+            goto done;
+        }
+    }
 
     zone z; dns_state_zone_owned(dc->st, apex, owner, &z);   /* G1: current owner's rows only */
     resp_start(&r, out, cap, limit, q, DNS_RCODE_NOERROR);
@@ -121,11 +161,13 @@ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
         resp_start(&r, out, cap, limit, q, DNS_RCODE_NXDOMAIN);
 
 done:;
-    if (q->edns) dns_resp_add_opt(&r, DNS_MAX_UDP);   /* signal we speak EDNS0 */
+    if (q->edns && ede >= 0) dns_resp_add_opt_ede(&r, DNS_MAX_UDP, (uint16_t)ede, ede_txt);
+    else if (q->edns) dns_resp_add_opt(&r, DNS_MAX_UDP);   /* signal we speak EDNS0 */
     return dns_resp_finish(&r);
 }
 
 /* ── transports ──────────────────────────────────────────────────────────────── */
+static int64_t core_ms(void);
 static void serve_udp(DnsdCore *dc) {
     uint8_t buf[4096];
     struct sockaddr_storage cli; socklen_t cl = sizeof cli;
@@ -134,8 +176,41 @@ static void serve_udp(DnsdCore *dc) {
     dns_query q;
     if (dns_parse_query(buf, (size_t)n, &q) != 0) return;
     uint8_t out[4096];
+    if (dc->lazy && dc->lazy_wait_ms > 0 && (size_t)n <= DNSD_PARK_QMAX) {
+        int nr = 0;
+        size_t rn = dnsd_core_answer_lazy(dc, &q, out, sizeof out, 0, &nr);
+        if (!nr) { if (rn) sendto(dc->ufd, out, rn, 0, (struct sockaddr *)&cli, cl); return; }
+        for (int i = 0; i < DNSD_PARK_MAX; i++)          /* LZ: park it */
+            if (!dc->park[i].used) {
+                DnsdPark *k = &dc->park[i];
+                k->used = 1; k->deadline_ms = core_ms() + dc->lazy_wait_ms;
+                memcpy(&k->cli, &cli, cl); k->cl = (unsigned)cl;
+                k->qlen = (uint16_t)n; memcpy(k->q, buf, (size_t)n);
+                dc->lazy_parked++;
+                return;
+            }
+        /* park table full: answer the loading signal now (below) */
+    }
     size_t rn = dnsd_core_answer(dc, &q, out, sizeof out, 0);
     if (rn) sendto(dc->ufd, out, rn, 0, (struct sockaddr *)&cli, cl);
+}
+
+/* LZ: re-try parked UDP queries; answer when ready or at the deadline */
+static int park_service(DnsdCore *dc, int64_t now) {
+    int left = 0;
+    for (int i = 0; i < DNSD_PARK_MAX; i++) {
+        DnsdPark *k = &dc->park[i];
+        if (!k->used) continue;
+        dns_query q; uint8_t out[4096]; size_t rn = 0;
+        if (dns_parse_query(k->q, k->qlen, &q) != 0) { k->used = 0; continue; }
+        int nr = 0;
+        if (now < k->deadline_ms) rn = dnsd_core_answer_lazy(dc, &q, out, sizeof out, 0, &nr);
+        if (nr) { left++; continue; }
+        if (now >= k->deadline_ms) rn = dnsd_core_answer(dc, &q, out, sizeof out, 0);
+        if (rn) sendto(dc->ufd, out, rn, 0, (struct sockaddr *)&k->cli, (socklen_t)k->cl);
+        k->used = 0;
+    }
+    return left;
 }
 
 /* ── TCP (RFC 7766), non-blocking ─────────────────────────────────────────────
@@ -220,7 +295,17 @@ static int tcp_answer(DnsdCore *dc, DnsdTcpConn *t) {
         if (t->in_len < 2 + mlen) break;
         dns_query q;
         if (dns_parse_query(t->in + 2, mlen, &q) != 0) return -1;
-        size_t rn = dnsd_core_answer(dc, &q, out, sizeof out, 1);
+        size_t rn;
+        if (dc->lazy && dc->lazy_wait_ms > 0) {          /* LZ: park the head query */
+            int64_t now = core_ms();
+            int first = !t->park_ms;
+            if (first) t->park_ms = now + dc->lazy_wait_ms;
+            int nr = 0;
+            rn = now < t->park_ms ? dnsd_core_answer_lazy(dc, &q, out, sizeof out, 1, &nr) : 0;
+            if (nr) { t->last_ms = now; if (first) dc->lazy_parked++; break; }   /* idle clock held */
+            if (now >= t->park_ms) rn = dnsd_core_answer(dc, &q, out, sizeof out, 1);
+            t->park_ms = 0;
+        } else rn = dnsd_core_answer(dc, &q, out, sizeof out, 1);
         if (rn == 0 || rn > 65535) return -1;
         t->out = malloc(rn + 2);
         if (!t->out) return -1;
@@ -304,7 +389,11 @@ int dnsd_core_poll(DnsdCore *dc, int timeout_ms) {
         int64_t d = d1 < d2 ? d1 : d2;
         if (next < 0 || d < next) next = d;
     }
+    int parked = 0;                                      /* LZ */
+    for (int i = 0; i < DNSD_PARK_MAX && !parked; i++) parked = dc->park[i].used;
+    for (int i = 0; i < DNSD_TCP_MAX && !parked; i++) parked = dc->tcp[i].used && dc->tcp[i].park_ms;
     int wait = timeout_ms;                               /* wake for the next expiry */
+    if (parked && (wait < 0 || wait > 25)) wait = 25;
     if (next >= 0) { int64_t left = next - now; if (left < 0) left = 0; if (wait < 0 || left < wait) wait = (int)left; }
     int pr = poll(pfd, (nfds_t)nf, wait);
     int served = 0;
@@ -316,6 +405,13 @@ int dnsd_core_poll(DnsdCore *dc, int timeout_ms) {
             else if (dc->tcp[map[k]].used && dc->tcp[map[k]].fd == pfd[k].fd) {
                 tcp_service(dc, &dc->tcp[map[k]], pfd[k].revents); served++;
             }
+        }
+    }
+    if (parked) {                                        /* LZ: ready yet? deadline? */
+        park_service(dc, core_ms());
+        for (int i = 0; i < DNSD_TCP_MAX; i++) {
+            DnsdTcpConn *t = &dc->tcp[i];
+            if (t->used && t->park_ms && !t->out && tcp_answer(dc, t) != 0) tcp_close(t);
         }
     }
     tcp_expire(dc, core_ms());

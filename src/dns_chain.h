@@ -27,4 +27,11 @@ void          dns_chain_sync(DnsChain *c, int64_t *height, int64_t *peer_height)
  * if unknown. Read-only; used for the overlay's seniority priority. */
 int64_t       dns_chain_epoch_start(DnsChain *c, const char *name);
 
+/* LZ: page the namespace — names with a LIVE lease (same MTP gate as
+ * owner_now), name order, name > after ("" = start), starting with `prefix`
+ * ("" = all), at most `limit`. cb returns 0 to stop. Returns names emitted.
+ * Read-only; this is the full name list a lazy node still has. */
+int           dns_chain_names(DnsChain *c, const char *prefix, const char *after, int limit,
+                              int (*cb)(void *u, const char *name), void *u);
+
 #endif /* DNS_CHAIN_H */
