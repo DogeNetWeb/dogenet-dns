@@ -174,7 +174,7 @@ check-gossip: net_test
 # two-node no-change-reply loop test: dns_net.c compiled twice (A_/B_ symbols,
 # faked time()) — a patched pair, and both mixed pairs (one side built with
 # DNSNET_RL_SLOTS=0, i.e. today's behaviour). Wire-neutral rate limit.
-LOOP_REN = $(foreach f,init up msg down tick announce peers set_seniority set_credit_blocks credit_phase set_peer_cap peer_cap_for_uplink set_transport counter,-Ddnsnet_$(f)=$(1)_dnsnet_$(f))
+LOOP_REN = $(foreach f,init up msg down tick announce peers set_seniority set_credit_blocks credit_phase set_peer_cap peer_cap_for_uplink set_transport counter zone_digest,-Ddnsnet_$(f)=$(1)_dnsnet_$(f))
 LOOP_LIB = test/loop_test.c src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c $(NETLIB) $(IDXSECP) -lsqlite3
 define LOOP_BIN
 $(1): test/loop_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
