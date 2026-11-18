@@ -42,7 +42,8 @@
  *     STALE-FIRST: every relay goes into one of DNSNET_LANES lanes by how long
  *     the name has been quiet (blocks since its last relayed change); lower
  *     lanes always go first. This replaces P10's ownership-age seniority.
- * L3  priority dispatch of pulls (lane, then waiting time) and a high lane in
+ * L3  priority dispatch of pulls (lane, live relay before AE page, then waiting
+ *     time; a live pull jumps the overflow FIFO) and a high lane in
  *     the responder's zget FIFO.
  * L4  dnzinv (announce + anti-entropy + no-change reply) bytes are capped at
  *     25% of each link's P6 budget; dumps and zgets get the other 75%.
@@ -139,6 +140,7 @@
 #define PULL_SLOTS  8192
 #define PULL_PROBE  16
 #define PULL_ALTS   4
+#define FRESH_FRAME 4               /* a dnzinv frame of <= this many names counts as live */
 #define PULL_OVF    2048            /* L1: per lane */
 #define SQ_CAP      4096            /* P7 per-peer FIFO of names awaiting a dump */
 #define SQH_CAP     1024            /* L3: its high lane */
@@ -239,7 +241,7 @@ static NameRec g_nr[NR_SETS][NR_WAYS];
 typedef struct {
     char    name[SP_NAME_MAX + 1];
     Peer   *inflight; time_t sent_at; time_t not_before;
-    int     lane; int64_t wait_ms;
+    int     lane, fresh; int64_t wait_ms;
     int     nalt; struct { Peer *p; uint8_t dg[32]; int force; } alt[PULL_ALTS];
 } PullSlot;
 static PullSlot g_pull[PULL_SLOTS];
@@ -252,7 +254,7 @@ static uint16_t name_phase_hash(const char *name);
 /* L1 overflow FIFOs: [0] high lane, [1] low lane */
 static struct { char name[SP_NAME_MAX + 1]; } g_aovf[2][ANN_OVF];
 static int g_aovf_head[2], g_aovf_n[2];
-typedef struct { char name[SP_NAME_MAX + 1]; int pi; uint32_t gen; uint8_t dg[32]; } PullOvf;
+typedef struct { char name[SP_NAME_MAX + 1]; int pi; uint32_t gen; uint8_t dg[32]; int fresh; } PullOvf;
 static PullOvf g_povf[2][PULL_OVF];
 static int g_povf_head[2], g_povf_n[2];
 
@@ -850,18 +852,41 @@ static int povf_push(int q, const PullOvf *e, int front) {
     g_povf_n[q]++;
     return 1;
 }
-static void pull_want(Peer *from, const char *name, const uint8_t their[32], time_t now) {
+/* fresh = learned from a small dnzinv frame (a live relay, not an AE page):
+ * pulled first within its lane, and queued at the FRONT of the bounded
+ * overflow FIFO, so a live change is not stuck behind a bulk catch-up */
+/* a live pull found its probe window full: move one waiting (not in flight)
+ * AE pull from that window to the back of the bounded overflow FIFO */
+static PullSlot *pull_bump(const char *name) {
+    uint64_t h = hname(name, NULL, 0);
+    for (int i = 0; i < PULL_PROBE; i++) {
+        PullSlot *v = &g_pull[(h + (uint64_t)i) % PULL_SLOTS];
+        if (!v->name[0] || v->inflight || v->fresh || v->nalt < 1) continue;
+        PullOvf e; memset(&e, 0, sizeof e);
+        Peer *p = v->alt[v->nalt - 1].p;
+        snprintf(e.name, sizeof e.name, "%s", v->name);
+        e.pi = (int)(p - g.peers); e.gen = p->gen; memcpy(e.dg, v->alt[v->nalt - 1].dg, 32);
+        if (povf_push(v->lane <= LANE_HI ? 0 : 1, &e, 0)) g.c.pull_ovf++;
+        else g.c.pull_ovf_drop++;                  /* AE re-offers it later */
+        pull_free(v);
+        return pull_find(name, 1);
+    }
+    return NULL;
+}
+static void pull_want(Peer *from, const char *name, const uint8_t their[32], time_t now, int fresh) {
     PullSlot *s = pull_find(name, 1);
+    if (!s && fresh) s = pull_bump(name);
     if (!s) {
         g.c.pull_full++;
         PullOvf e; memset(&e, 0, sizeof e);
         snprintf(e.name, sizeof e.name, "%s", name);
-        e.pi = (int)(from - g.peers); e.gen = from->gen; memcpy(e.dg, their, 32);
-        if (povf_push(name_lane(name) <= LANE_HI ? 0 : 1, &e, 0)) g.c.pull_ovf++;
+        e.pi = (int)(from - g.peers); e.gen = from->gen; memcpy(e.dg, their, 32); e.fresh = fresh;
+        if (povf_push(name_lane(name) <= LANE_HI ? 0 : 1, &e, fresh)) g.c.pull_ovf++;
         else g.c.pull_ovf_drop++;
         return;
     }
     if (s->inflight) g.c.pull_dedup++;
+    if (fresh) s->fresh = 1;
     pull_alt(s, from, their, 0);
     if (s->lane <= g.min_wait_lane) pull_dispatch(s, now);   /* L3: never ahead of a better lane */
     else g.pull_kick = 1;
@@ -887,6 +912,7 @@ static void povf_service(time_t now) {
             if (!memcmp(ours, e.dg, 32)) continue;                 /* converged meanwhile */
             PullSlot *s = pull_find(e.name, 1);
             if (!s) { povf_push(q, &e, 1); break; }               /* still full: keep its place */
+            if (e.fresh) s->fresh = 1;
             pull_alt(s, p, e.dg, 0);
         }
     }
@@ -895,6 +921,7 @@ static void povf_service(time_t now) {
 static int pull_cmp(const void *a, const void *b) {
     const PullSlot *x = &g_pull[*(const int *)a], *y = &g_pull[*(const int *)b];
     if (x->lane != y->lane) return x->lane - y->lane;
+    if (x->fresh != y->fresh) return y->fresh - x->fresh;          /* live relays first */
     return x->wait_ms < y->wait_ms ? -1 : x->wait_ms > y->wait_ms;
 }
 static void pull_service(time_t now) {
@@ -1069,6 +1096,7 @@ static void on_zinv(Peer *from, const uint8_t *pay, int n) {
     int off = 0; uint64_t count;
     if (!sp_rvar(pay, n, &off, &count) || count > 4096) return;
     time_t now = time(NULL);
+    int fresh = count <= FRESH_FRAME;
     for (uint64_t i = 0; i < count; i++) {
         if (off + 1 > n) return;
         int nlen = pay[off++];
@@ -1079,7 +1107,7 @@ static void on_zinv(Peer *from, const uint8_t *pay, int n) {
         if (!sp_name_valid(name, (size_t)nlen)) continue;
         uint8_t ours[32];
         dns_state_digest(g.st, name, ours);
-        if (memcmp(ours, their, 32) != 0) pull_want(from, name, their, now);
+        if (memcmp(ours, their, 32) != 0) pull_want(from, name, their, now, fresh);
     }
 }
 
