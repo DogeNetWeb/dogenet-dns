@@ -35,11 +35,33 @@ void  dnsnet_tick(void);                               /* hold-queue + anti-entr
 /* A local publish changed `name` — announce it to every live peer. */
 void  dnsnet_announce(const char *name);
 
-/* Optional P10 hook: 1 if `name`'s current ownership epoch is senior (older
- * owners first under backlog). NULL (default) = everyone is senior. */
+/* Former P10 hook (ownership-age seniority). Kept so hosts still link; L2's
+ * stale-first lanes now decide priority and the hook is not consulted. */
 void  dnsnet_set_seniority(int (*fn)(const char *name));
 
 /* live peer count (status surfaces) */
 int   dnsnet_peers(void);
+
+/* ── local anti-spam settings (L2, L6, L7); no wire effect ─────────────────────
+ * Each survives dnsnet_init and may be set before or after it. */
+/* L2: one relay credit per `blocks` new chain blocks (default 10; burst 4). */
+void  dnsnet_set_credit_blocks(int blocks);
+/* L2 stagger: the block phase (0..credit_blocks-1) on which `name` gains a
+ * credit, from a per-process keyed hash */
+int   dnsnet_credit_phase(const char *name);
+/* L7: at most `cap` dn* peers (default 64 = MAX_PEERS); extra peers still get
+ * chain service, just no zone gossip. */
+void  dnsnet_set_peer_cap(int cap);
+/* L7: the cap for an uplink of `mbit` Mbit/s = mbit / 0.52 (one saturated
+ * link at P6), clamped to [2, 64]; mbit <= 0 -> 64. */
+int   dnsnet_peer_cap_for_uplink(double mbit);
+/* L6/L7: optional transport hooks. pending(peer) = bytes queued but not yet
+ * written to the socket (P6 refill waits for it to drain); drop(peer, why) =
+ * close that connection (L6 disconnect; called from dnsnet_tick only);
+ * is_local(peer) = 1 for loopback (never disconnected). Any may be NULL. */
+void  dnsnet_set_transport(size_t (*pending)(void *peer), void (*drop)(void *peer, const char *why),
+                           int (*is_local)(void *peer));
+/* counters by name (tests, status); "blk" = the max-seen tip credit uses */
+unsigned long dnsnet_counter(const char *name);
 
 #endif /* DNS_NET_H */
