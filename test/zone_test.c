@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* zone_test.c — src/zone.c (the zone-file / record-text front door) and the
  * sp_state record key it feeds (dns_key_pack/unpack in src/dns_state.c).
  *

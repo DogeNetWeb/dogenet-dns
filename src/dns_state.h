@@ -25,7 +25,7 @@
 
 #include <stdint.h>
 #include "zone.h"
-#include "dogenet/state.h"
+#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
 
 #define DNS_SCOPE       0x20    /* §2.2 delegation scope bit for zone ops */
 #define DNS_BUDGET      8192    /* bytes of held ops per name */

@@ -1,0 +1,2449 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 135a4aa..51fab43 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -221,6 +221,7 @@ add_library(dns_embed STATIC
+     ${DNS_DIR}/src/zone.c
+     ${DNS_DIR}/src/dns_wire.c
+     ${DNS_DIR}/src/dnsd_core.c
++    ${DNS_DIR}/src/dns_lazy.c
+     src/dnsnet.c
+     src/dirscan.c
+     src/zonekey.c
+diff --git a/dns/Makefile b/dns/Makefile
+index 984b7f3..0477621 100644
+--- a/dns/Makefile
++++ b/dns/Makefile
+@@ -19,7 +19,7 @@
+ # see state_dns_test.
+ 
+ CC      ?= cc
+-CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wshadow
++CFLAGS  ?= -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wshadow
+ 
+ # ── sibling repos (relative, as the pepenet repo family does) ────────────────
+ MESHDIR := ../pepenet-mesh
+@@ -46,7 +46,7 @@ IDX_SRC    := $(addprefix $(IDXSRC)/,attrib.c adapter.c oracle_feed.c db.c chain
+ MESH_SRC   := $(addprefix $(MESHDIR)/src/,crypto.c view.c wire.c state.c)
+ # the DNS overlay + the dnsd driver
+ DNS_SRC    := src/dns_state.c src/dns_chain.c src/dns_net.c src/zone.c \
+-              src/dns_wire.c src/dnsd_core.c src/dnsd.c
++              src/dns_wire.c src/dnsd_core.c src/dnsd.c src/dns_lazy.c
+ 
+ INC_IDX  := -I$(IDXSRC) -I$(SECP_I) -I$(SMDIR)
+ INC_MESH := -I$(MESHDIR)/include -I$(SMDIR)
+@@ -90,11 +90,11 @@ dns-cli: src/dns-cli.c
+ # fake chain oracle — not the chain-wire node. Links the shared mesh's prebuilt
+ # lib (it bundles sp_state + the hash/secp shim), same as the old codec tests.
+ NETLIB   := $(MESHDIR)/libpepenetnet.a
+-TEST_SRC := test/state_dns_test.c src/dns_state.c src/dns_net.c src/zone.c src/dns_wire.c
++TEST_SRC := test/state_dns_test.c src/dns_state.c src/dns_net.c src/zone.c src/dns_wire.c src/dns_lazy.c
+ INC_TEST := -Isrc -I$(MESHDIR)/include
+ 
+ $(NETLIB):
+-	$(MAKE) -C $(MESHDIR)
++	$(MAKE) -C $(MESHDIR) libpepenetnet.a   # just the lib: check-lazy must not build mesh `all`
+ 
+ state_dns_test: $(TEST_SRC) $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+ 	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(TEST_SRC) $(NETLIB) $(IDXSECP) -lsqlite3
+@@ -120,7 +120,7 @@ clean:
+ # indexer's vendored secp), never the indexer sources.
+ WIRE_SRC := test/wire_test.c src/dns_wire.c
+ ZONE_SRC := test/zone_test.c src/zone.c src/dns_wire.c src/dns_state.c
+-CORE_SRC := test/dnsd_core_test.c src/dnsd_core.c src/dns_state.c src/zone.c src/dns_wire.c
++CORE_SRC := test/dnsd_core_test.c src/dnsd_core.c src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c
+ 
+ wire_test: $(WIRE_SRC) $(wildcard src/*.h)
+ 	$(CC) $(CFLAGS) -Isrc -o $@ $(WIRE_SRC)
+@@ -158,7 +158,7 @@ clean-tests:
+ #
+ #   make check-gossip     peer table, hostile frames, 200k-mutation fuzz,
+ #                         inv/get/dat semantics, the hold queue, convergence
+-NET_SRC := test/net_test.c src/dns_net.c src/dns_state.c src/zone.c src/dns_wire.c
++NET_SRC := test/net_test.c src/dns_net.c src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c
+ 
+ net_test: $(NET_SRC) $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+ 	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(NET_SRC) $(NETLIB) $(IDXSECP) -lsqlite3
+@@ -172,7 +172,7 @@ check-gossip: net_test
+ antispam_test: test/antispam_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+ 	@mkdir -p build
+ 	$(CC) $(CFLAGS) $(INC_TEST) -Dtime=ft_time -DDNSNET_TEST_CLOCK_MS=ft_ms -c src/dns_net.c -o build/antispam_dns_net.o
+-	$(CC) $(CFLAGS) $(INC_TEST) -o $@ test/antispam_test.c build/antispam_dns_net.o src/dns_state.c src/zone.c src/dns_wire.c $(NETLIB) $(IDXSECP) -lsqlite3
++	$(CC) $(CFLAGS) $(INC_TEST) -o $@ test/antispam_test.c build/antispam_dns_net.o src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c $(NETLIB) $(IDXSECP) -lsqlite3
+ 
+ check-antispam: antispam_test
+ 	./antispam_test
+@@ -184,9 +184,21 @@ check-antispam: antispam_test
+ p2p_test: test/p2p_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
+ 	@mkdir -p build
+ 	$(CC) $(CFLAGS) $(INC_TEST) -Dtime=ft_time -DDNSNET_TEST_CLOCK_MS=ft_ms -c src/dns_net.c -o build/p2p_dns_net.o
+-	$(CC) $(CFLAGS) $(INC_TEST) -o $@ test/p2p_test.c build/p2p_dns_net.o src/dns_state.c src/zone.c src/dns_wire.c $(NETLIB) $(IDXSECP) -lsqlite3
++	$(CC) $(CFLAGS) $(INC_TEST) -o $@ test/p2p_test.c build/p2p_dns_net.o src/dns_state.c src/zone.c src/dns_wire.c src/dns_lazy.c $(NETLIB) $(IDXSECP) -lsqlite3
+ 
+ check-p2p: p2p_test
+ 	./p2p_test
+ 
+ .PHONY: check-p2p
++
++# LZ: lazy (namespace-only) mode — dns_lazy table + dnsd_core lazy answers, fake clock
++LAZY_SRC := test/lazy_test.c src/dnsd_core.c src/dns_state.c src/zone.c src/dns_wire.c
++lazy_test: $(LAZY_SRC) src/dns_lazy.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
++	@mkdir -p build
++	$(CC) $(CFLAGS) $(INC_TEST) -DDNS_LAZY_TEST_CLOCK_MS=lz_clock -c src/dns_lazy.c -o build/lazy_dns_lazy.o
++	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(LAZY_SRC) build/lazy_dns_lazy.o $(NETLIB) $(IDXSECP) -lsqlite3 -lpthread
++
++check-lazy: lazy_test
++	./lazy_test
++
++.PHONY: check-lazy
+diff --git a/dns/src/dns_chain.c b/dns/src/dns_chain.c
+index 66fe5a5..7ae61d7 100644
+--- a/dns/src/dns_chain.c
++++ b/dns/src/dns_chain.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
++#endif
+ /* dns_chain.c — see dns_chain.h. Plain sqlite over the indexer's tables (no
+  * indexer symbols), so the standalone tests and the tls embed link light. */
+ #include "dns_chain.h"
+@@ -139,3 +142,33 @@ int64_t dns_chain_epoch_start(DnsChain *c, const char *name) {
+     sqlite3_reset(c->q_epoch);   /* release the read txn */
+     return h;
+ }
++
++int dns_chain_names(DnsChain *c, const char *prefix, const char *after, int limit,
++                    int (*cb)(void *u, const char *name), void *u) {
++    if (!c || limit <= 0) return 0;
++    int64_t mtp = (int64_t)time(NULL);              /* same gate as owner_now here (wall clock) */
++    char lo[80], hi[80];
++    const char *pf = prefix ? prefix : "";
++    const char *af = after ? after : "";
++    snprintf(lo, sizeof lo, "%s", strcmp(af, pf) > 0 ? af : pf);
++    snprintf(hi, sizeof hi, "%s\x7f", pf);
++    sqlite3_stmt *q = NULL;
++    if (sqlite3_prepare_v2(c->db,
++            "SELECT name FROM names WHERE name >= ?1 AND name < ?2 AND name <> ?3 "
++            "AND lease_expiry > ?4 AND length(owner) = 20 ORDER BY name LIMIT ?5", -1, &q, NULL) != SQLITE_OK)
++        return 0;
++    sqlite3_bind_text(q, 1, lo, -1, SQLITE_STATIC);
++    sqlite3_bind_text(q, 2, hi, -1, SQLITE_STATIC);
++    sqlite3_bind_text(q, 3, af, -1, SQLITE_STATIC);
++    sqlite3_bind_int64(q, 4, mtp);
++    sqlite3_bind_int(q, 5, limit);
++    int n = 0;
++    while (sqlite3_step(q) == SQLITE_ROW) {
++        const char *nm = (const char *)sqlite3_column_text(q, 0);
++        if (!nm) continue;
++        n++;
++        if (!cb(u, nm)) break;
++    }
++    sqlite3_finalize(q);
++    return n;
++}
+diff --git a/dns/src/dns_chain.h b/dns/src/dns_chain.h
+index aa76bf6..67a8fe9 100644
+--- a/dns/src/dns_chain.h
++++ b/dns/src/dns_chain.h
+@@ -12,7 +12,7 @@
+ #ifndef DNS_CHAIN_H
+ #define DNS_CHAIN_H
+ 
+-#include "pepenet/state.h"
++#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
+ #include <stdint.h>
+ 
+ typedef struct DnsChain DnsChain;
+@@ -27,4 +27,11 @@ void          dns_chain_sync(DnsChain *c, int64_t *height, int64_t *peer_height)
+  * if unknown. Read-only; used for the overlay's seniority priority. */
+ int64_t       dns_chain_epoch_start(DnsChain *c, const char *name);
+ 
++/* LZ: page the namespace — names with a LIVE lease (same lease gate as
++ * owner_now), name order, name > after ("" = start), starting with `prefix`
++ * ("" = all), at most `limit`. cb returns 0 to stop. Returns names emitted.
++ * Read-only; this is the full name list a lazy node still has. */
++int           dns_chain_names(DnsChain *c, const char *prefix, const char *after, int limit,
++                              int (*cb)(void *u, const char *name), void *u);
++
+ #endif /* DNS_CHAIN_H */
+diff --git a/dns/src/dns_lazy.c b/dns/src/dns_lazy.c
+new file mode 100644
+index 0000000..e20c0cf
+--- /dev/null
++++ b/dns/src/dns_lazy.c
+@@ -0,0 +1,356 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
++#endif
++/* dns_lazy.c — see dns_lazy.h. One mutex-guarded open-addressing table of
++ * tracked names + a small request ring; no allocation after init. */
++#include "dns_lazy.h"
++
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#define NAME_CAP 64
++#define REQ_CAP  512
++
++typedef struct {
++    char     name[NAME_CAP];
++    uint8_t  used, state, has_data, empty, queued, pinned;
++    int64_t  fetched_ms;     /* last successful fetch (0 = never) */
++    int64_t  used_ms;        /* last query (LRU) */
++    int64_t  retry_ms;       /* FAILED: next query may re-fetch after this */
++    int64_t  bytes;
++} Ent;
++
++static struct {
++    int             on;
++    DnsLazyConf     c;
++    pthread_mutex_t mu;
++    Ent            *t; uint32_t cap; int n, ndata; int64_t bytes;
++    char            req[REQ_CAP][NAME_CAP]; int rh, rn;
++    DnsLazyStats    st;
++    void          (*kick)(void);
++    int             kicked;           /* a fetch was queued under the lock: kick after unlock */
++} L = { .mu = PTHREAD_MUTEX_INITIALIZER };
++void dns_lazy_set_kick(void (*fn)(void)) { L.kick = fn; }
++void dns_lazy_poke(void) { if (L.kick) L.kick(); }
++static DnsLazyDigestFn g_dfn; static void *g_du;
++void dns_lazy_set_digest_oracle(DnsLazyDigestFn fn, void *u) { g_dfn = fn; g_du = u; }
++int dns_lazy_committed_digest(const char *name, uint8_t digest[32]) {
++    return g_dfn ? g_dfn(g_du, name, digest) : 0;
++}
++static void unlock_kick(void) {
++    int k = L.kicked; L.kicked = 0;
++    pthread_mutex_unlock(&L.mu);
++    if (k && L.kick) L.kick();
++}
++
++#ifdef DNS_LAZY_TEST_CLOCK_MS
++int64_t DNS_LAZY_TEST_CLOCK_MS(void);
++static int64_t now_ms(void) { return DNS_LAZY_TEST_CLOCK_MS(); }
++#else
++static int64_t now_ms(void) {
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++}
++#endif
++
++void dns_lazy_conf_default(DnsLazyConf *c) {
++    c->max_names = 2048; c->max_bytes = 8 << 20; c->ttl_s = 300; c->empty_ttl_s = 60;
++    c->max_stale_s = 86400; c->wait_ms = 3000; c->fail_retry_s = 5;
++}
++const char *dns_lazy_state_name(int s) {
++    switch (s) { case DNS_LAZY_LOADING: return "loading"; case DNS_LAZY_READY: return "ready";
++                 case DNS_LAZY_FAILED: return "failed"; default: return "absent"; }
++}
++
++void dns_lazy_init(const DnsLazyConf *c) {
++    pthread_mutex_lock(&L.mu);
++    dns_lazy_conf_default(&L.c);
++    if (c) L.c = *c;
++    if (L.c.max_names < 16) L.c.max_names = 16;
++    if (L.c.max_names > 1 << 20) L.c.max_names = 1 << 20;
++    if (L.c.max_bytes < 65536) L.c.max_bytes = 65536;
++    if (L.c.ttl_s < 1) L.c.ttl_s = 1;
++    if (L.c.empty_ttl_s < 1) L.c.empty_ttl_s = 1;
++    if (L.c.max_stale_s < L.c.ttl_s) L.c.max_stale_s = L.c.ttl_s;
++    if (L.c.wait_ms < 0) L.c.wait_ms = 0;
++    if (L.c.wait_ms > 9000) L.c.wait_ms = 9000;
++    if (L.c.fail_retry_s < 1) L.c.fail_retry_s = 1;
++    uint32_t cap = 256;
++    while (cap < (uint32_t)L.c.max_names * 4u) cap <<= 1;   /* data + loading/failed, load <= 1/2 */
++    free(L.t);
++    L.t = calloc(cap, sizeof *L.t);
++    L.cap = L.t ? cap : 0; L.n = L.ndata = 0; L.bytes = 0; L.rh = L.rn = 0;
++    memset(&L.st, 0, sizeof L.st);
++    L.on = L.t != NULL;
++    pthread_mutex_unlock(&L.mu);
++}
++int dns_lazy_enabled(void) { return L.on; }
++const DnsLazyConf *dns_lazy_conf(void) { return &L.c; }
++
++static uint32_t h32(const char *s) {
++    uint32_t h = 2166136261u;
++    for (; *s; s++) { h ^= (uint8_t)*s; h *= 16777619u; }
++    h ^= h >> 15; h *= 0x2c1b3c6dU; h ^= h >> 12;
++    return h;
++}
++static Ent *find(const char *name) {
++    if (!L.cap) return NULL;
++    for (uint32_t i = h32(name) & (L.cap - 1), k = 0; k < L.cap; i = (i + 1) & (L.cap - 1), k++) {
++        if (!L.t[i].used) return NULL;
++        if (!strcmp(L.t[i].name, name)) return &L.t[i];
++    }
++    return NULL;
++}
++static Ent *insert(const char *name) {
++    if (!L.cap || strlen(name) >= NAME_CAP || (uint32_t)L.n * 2 >= L.cap) return NULL;
++    uint32_t i = h32(name) & (L.cap - 1);
++    while (L.t[i].used) i = (i + 1) & (L.cap - 1);
++    memset(&L.t[i], 0, sizeof L.t[i]);
++    snprintf(L.t[i].name, NAME_CAP, "%s", name);
++    L.t[i].used = 1; L.n++;
++    return &L.t[i];
++}
++/* backward-shift delete (linear probing stays tombstone-free) */
++static void erase(Ent *e) {
++    if (e->has_data) { L.ndata--; L.bytes -= e->bytes; }
++    uint32_t i = (uint32_t)(e - L.t), j = i;
++    L.t[i].used = 0; L.n--;
++    for (;;) {
++        j = (j + 1) & (L.cap - 1);
++        if (!L.t[j].used) break;
++        uint32_t k = h32(L.t[j].name) & (L.cap - 1);
++        int move = (i <= j) ? (k <= i || k > j) : (k <= i && k > j);
++        if (move) { L.t[i] = L.t[j]; L.t[j].used = 0; i = j; }
++    }
++}
++static void enqueue(Ent *e) {
++    if (e->queued || L.rn >= REQ_CAP) return;
++    snprintf(L.req[(L.rh + L.rn) % REQ_CAP], NAME_CAP, "%s", e->name);
++    L.rn++; e->queued = 1; L.kicked = 1;
++}
++static int age_of(const Ent *e, int64_t now) {
++    return e->has_data && e->fetched_ms ? (int)((now - e->fetched_ms) / 1000) : (e->has_data ? 0 : -1);
++}
++/* what the resolver may answer from right now */
++static int servable(const Ent *e, int64_t now) {
++    if (e->has_data && (now - e->fetched_ms) <= (int64_t)L.c.max_stale_s * 1000) return DNS_LAZY_READY;
++    if (e->state == DNS_LAZY_FAILED) return DNS_LAZY_FAILED;
++    return DNS_LAZY_LOADING;
++}
++
++static int want(const char *name, int *age_s, int touch, int fetch) {
++    if (!L.on) { if (age_s) *age_s = -1; return DNS_LAZY_READY; }
++    pthread_mutex_lock(&L.mu);
++    int64_t now = now_ms();
++    Ent *e = find(name);
++    if (!e && fetch) e = insert(name);
++    if (!e) {
++        if (age_s) *age_s = -1;
++        pthread_mutex_unlock(&L.mu);
++        return fetch ? DNS_LAZY_LOADING : DNS_LAZY_ABSENT;   /* table full: never NXDOMAIN */
++    }
++    if (touch) e->used_ms = now;
++    if (fetch) {
++        int64_t ttl = (int64_t)(e->empty ? L.c.empty_ttl_s : L.c.ttl_s) * 1000;
++        int due = 0;
++        if (e->state == DNS_LAZY_ABSENT) due = 1;
++        else if (e->state == DNS_LAZY_FAILED) due = now >= e->retry_ms;
++        else if (e->state == DNS_LAZY_READY) due = !e->has_data || now - e->fetched_ms > ttl;
++        if (due) {
++            enqueue(e);
++            if (e->queued) e->state = DNS_LAZY_LOADING;
++        }
++    }
++    int s = servable(e, now);
++    if (touch == 1) {                    /* 2 = a parked query's re-check: not a new query */
++        if (s == DNS_LAZY_READY) {
++            L.st.hits++;
++            int64_t ttl = (int64_t)(e->empty ? L.c.empty_ttl_s : L.c.ttl_s) * 1000;
++            if (now - e->fetched_ms > ttl) L.st.stale_served++;
++        } else L.st.misses++;
++    }
++    if (age_s) *age_s = age_of(e, now);
++    unlock_kick();
++    return s;
++}
++int dns_lazy_want(const char *name, int *age_s) { return want(name, age_s, 1, 1); }
++int dns_lazy_want_recheck(const char *name, int *age_s) { return want(name, age_s, 2, 1); }
++int dns_lazy_peek(const char *name, int *age_s) {
++    if (!L.on) { if (age_s) *age_s = -1; return DNS_LAZY_ABSENT; }
++    int s = want(name, age_s, 0, 0);
++    if (s == DNS_LAZY_ABSENT) return s;
++    pthread_mutex_lock(&L.mu);
++    Ent *e = find(name);
++    if (e && !e->has_data && e->state == DNS_LAZY_ABSENT) s = DNS_LAZY_ABSENT;
++    pthread_mutex_unlock(&L.mu);
++    return s;
++}
++int dns_lazy_prefetch(const char *name) {
++    if (!L.on) return 0;
++    pthread_mutex_lock(&L.mu);
++    int64_t now = now_ms();
++    Ent *e = find(name);
++    if (!e) e = insert(name);
++    int q = 0;
++    if (e && e->state != DNS_LAZY_LOADING) {
++        int64_t ttl = (int64_t)(e->empty ? L.c.empty_ttl_s : L.c.ttl_s) * 1000;
++        if (!e->has_data || now - e->fetched_ms > ttl) {
++            if (!e->used_ms) e->used_ms = now;
++            enqueue(e);
++            if (e->queued) { e->state = DNS_LAZY_LOADING; q = 1; }
++        }
++    }
++    unlock_kick();
++    return q;
++}
++void dns_lazy_invalidate(const char *name) {
++    if (!L.on) return;
++    pthread_mutex_lock(&L.mu);
++    Ent *e = find(name);
++    if (e && e->state != DNS_LAZY_LOADING) {
++        if (e->has_data) { L.ndata--; L.bytes -= e->bytes; }
++        e->has_data = 0; e->bytes = 0; e->fetched_ms = 0; e->state = DNS_LAZY_ABSENT;
++    }
++    pthread_mutex_unlock(&L.mu);
++}
++
++int dns_lazy_pop_request(char name[64]) {
++    pthread_mutex_lock(&L.mu);
++    int ok = 0;
++    while (L.rn > 0 && !ok) {
++        char *r = L.req[L.rh]; L.rh = (L.rh + 1) % REQ_CAP; L.rn--;
++        Ent *e = find(r);
++        if (!e || !e->queued) continue;           /* evicted meanwhile */
++        e->queued = 0;
++        snprintf(name, NAME_CAP, "%s", r); ok = 1;
++    }
++    pthread_mutex_unlock(&L.mu);
++    return ok;
++}
++void dns_lazy_requeue(const char *name) {
++    pthread_mutex_lock(&L.mu);
++    Ent *e = find(name);
++    if (e) enqueue(e);
++    pthread_mutex_unlock(&L.mu);
++}
++int dns_lazy_tracked(const char *name) {
++    if (!L.on) return 1;
++    pthread_mutex_lock(&L.mu);
++    Ent *e = find(name);
++    int t = e && (e->has_data || e->state == DNS_LAZY_LOADING || e->pinned);
++    pthread_mutex_unlock(&L.mu);
++    return t;
++}
++void dns_lazy_pin(const char *name) {
++    if (!L.on) return;
++    pthread_mutex_lock(&L.mu);
++    Ent *e = find(name);
++    if (!e) e = insert(name);
++    if (e) { e->pinned = 1; e->used_ms = now_ms(); }
++    pthread_mutex_unlock(&L.mu);
++}
++int dns_lazy_pinned(const char *name) {
++    if (!L.on) return 0;
++    pthread_mutex_lock(&L.mu);
++    Ent *e = find(name);
++    int p = e && e->pinned;
++    pthread_mutex_unlock(&L.mu);
++    return p;
++}
++void dns_lazy_begin(const char *name) {
++    pthread_mutex_lock(&L.mu);
++    Ent *e = find(name);
++    if (!e) e = insert(name);
++    if (e) e->state = DNS_LAZY_LOADING;
++    pthread_mutex_unlock(&L.mu);
++}
++static void set_bytes(Ent *e, int64_t bytes) {
++    if (e->has_data) L.bytes -= e->bytes; else L.ndata++;
++    e->has_data = 1; e->bytes = bytes; L.bytes += bytes;
++}
++void dns_lazy_done(const char *name, int ok, int64_t bytes, int empty) {
++    pthread_mutex_lock(&L.mu);
++    int64_t now = now_ms();
++    Ent *e = find(name);
++    if (!e) e = insert(name);
++    if (e) {
++        if (ok) {
++            set_bytes(e, bytes); e->empty = (uint8_t)(empty != 0);
++            e->fetched_ms = now; e->state = DNS_LAZY_READY; L.st.fetch_ok++;
++            if (!e->used_ms) e->used_ms = now;
++        } else {
++            e->state = DNS_LAZY_FAILED; e->retry_ms = now + (int64_t)L.c.fail_retry_s * 1000;
++            L.st.fetch_fail++;
++            if (!e->used_ms) e->used_ms = now;
++        }
++    }
++    pthread_mutex_unlock(&L.mu);
++}
++void dns_lazy_bytes(const char *name, int64_t bytes) {
++    pthread_mutex_lock(&L.mu);
++    Ent *e = find(name);
++    if (e && e->has_data) set_bytes(e, bytes);
++    pthread_mutex_unlock(&L.mu);
++}
++void dns_lazy_adopt(const char *name, int64_t bytes) {
++    pthread_mutex_lock(&L.mu);
++    Ent *e = find(name);
++    if (!e) e = insert(name);
++    if (e) {
++        int64_t now = now_ms();
++        set_bytes(e, bytes); e->state = DNS_LAZY_READY;
++        /* unknown age: stale at once (re-validated on first use), but servable */
++        e->fetched_ms = now - ((int64_t)L.c.ttl_s + 1) * 1000;
++        e->used_ms = 0;                         /* oldest in LRU until used */
++    }
++    pthread_mutex_unlock(&L.mu);
++}
++int dns_lazy_evict_one(char victim[64]) {
++    pthread_mutex_lock(&L.mu);
++    int64_t now = now_ms();
++    int over = L.ndata > L.c.max_names || L.bytes > L.c.max_bytes || (uint32_t)L.n * 2 + 8 >= L.cap;
++    Ent *best = NULL;
++    if (over)
++        for (uint32_t i = 0; i < L.cap; i++) {
++            Ent *e = &L.t[i];
++            if (!e->used || e->pinned || e->state == DNS_LAZY_LOADING || e->queued) continue;
++            /* data-less FAILED/ABSENT entries go first (they hold no store bytes) */
++            if (!e->has_data && (!best || best->has_data || e->used_ms < best->used_ms)) { best = e; continue; }
++            if (e->has_data && (!best || (best->has_data && e->used_ms < best->used_ms))) best = e;
++        }
++    int ok = 0;
++    if (best) {
++        snprintf(victim, NAME_CAP, "%s", best->name);
++        ok = best->has_data ? 1 : 2;                /* 2 = table-only (nothing in the store) */
++        erase(best); L.st.evicted++;
++    }
++    (void)now;
++    pthread_mutex_unlock(&L.mu);
++    return ok;
++}
++void dns_lazy_stats(DnsLazyStats *s) {
++    pthread_mutex_lock(&L.mu);
++    *s = L.st;
++    s->names = L.ndata; s->bytes = L.bytes; s->queued = L.rn;
++    s->ready = s->loading = s->failed = 0;
++    for (uint32_t i = 0; i < L.cap; i++) {
++        if (!L.t[i].used) continue;
++        if (L.t[i].state == DNS_LAZY_LOADING) s->loading++;
++        else if (L.t[i].state == DNS_LAZY_FAILED) s->failed++;
++        else if (L.t[i].has_data) s->ready++;
++    }
++    pthread_mutex_unlock(&L.mu);
++}
++void dns_lazy_each(int (*cb)(void *u, const char *name, int state, int age_s, int64_t bytes), void *u) {
++    pthread_mutex_lock(&L.mu);
++    int64_t now = now_ms();
++    for (uint32_t i = 0; i < L.cap; i++) {
++        Ent *e = &L.t[i];
++        if (!e->used) continue;
++        if (!cb(u, e->name, e->has_data ? servable(e, now) : e->state, age_of(e, now), e->bytes)) break;
++    }
++    pthread_mutex_unlock(&L.mu);
++}
+diff --git a/dns/src/dns_lazy.h b/dns/src/dns_lazy.h
+new file mode 100644
+index 0000000..a19f28d
+--- /dev/null
++++ b/dns/src/dns_lazy.h
+@@ -0,0 +1,118 @@
++/* dns_lazy.h — lazy (namespace-only) mode: on-demand zone cache.
++ *
++ * A lazy node syncs the NAMESPACE (the indexer db: owner + lease per name)
++ * exactly like a full node, but does not mirror every zone. A zone is fetched
++ * from peers the first time a query needs it, with the EXISTING dnzget/dnzdat
++ * pair (no new wire message), admitted through the same sp_state_admit
++ * verification a full node uses (owner/§2.2 hot-key signature, lease-gated
++ * current owner, anchor header hash on our chain), then cached in the --store
++ * sqlite with a TTL and bounded LRU eviction.
++ *
++ * This module is the thread-safe shared state between the resolver thread
++ * (asks "is this zone servable?", queues a fetch) and the net thread (runs
++ * fetches in dns_net.c, records results, evicts). One instance per process.
++ * Full mode never calls dns_lazy_init and every query is unaffected. */
++#ifndef DNS_LAZY_H
++#define DNS_LAZY_H
++
++#include <stdint.h>
++
++typedef struct {
++    int     max_names;      /* cached zones kept (LRU beyond)       default 2048 */
++    int64_t max_bytes;      /* sum of held op bytes kept (LRU)      default 8 MiB */
++    int     ttl_s;          /* fresh for this long, then served stale while one
++                               background re-fetch runs             default 300 */
++    int     empty_ttl_s;    /* same, for a verified-EMPTY zone      default 60 */
++    int     max_stale_s;    /* never serve a zone older than this
++                               (re-fetch failing) — loading instead  default 86400 */
++    int     wait_ms;        /* resolver parks a not-ready query up to this long
++                               before answering the loading signal  default 3000 */
++    int     fail_retry_s;   /* a FAILED fetch is retried by the next query after
++                               this long                             default 5 */
++} DnsLazyConf;
++
++void dns_lazy_conf_default(DnsLazyConf *c);
++
++/* states as the resolver sees them */
++enum {
++    DNS_LAZY_ABSENT  = 0,   /* never fetched (or evicted)                       */
++    DNS_LAZY_LOADING = 1,   /* fetch in flight, nothing servable yet            */
++    DNS_LAZY_READY   = 2,   /* verified zone held (maybe stale: refresh queued) */
++    DNS_LAZY_FAILED  = 3,   /* last fetch got no valid answer from any peer     */
++};
++const char *dns_lazy_state_name(int st);
++
++/* optional: called (any thread, outside the lock) whenever a fetch is queued,
++ * so the host can wake its net loop at once (dnsd: idx_serve_wake_fd pipe) */
++void dns_lazy_set_kick(void (*fn)(void));
++/* wake the net loop now (fetch deadlines are checked on its tick); a waiter
++ * that parks a query calls this ~every 100 ms so a timed-out peer is
++ * replaced promptly instead of on the next 1 s idle tick */
++void dns_lazy_poke(void);
++
++/* optional zone-digest COMMITMENT source (A2). fn returns 1 and fills
++ * digest[32] when a committed digest is known for name, else 0. A fetched
++ * zone whose digest (dnsnet_zone_digest: sha256 over its sorted op_ids)
++ * differs is NOT served: the fetch keeps asking other peers, else FAILS.
++ * Today nothing on chain commits a zone digest (footprint draft gap G3), so
++ * the only built-in source is --lazy-digest-file (operator/test pins). */
++typedef int (*DnsLazyDigestFn)(void *u, const char *name, uint8_t digest[32]);
++void dns_lazy_set_digest_oracle(DnsLazyDigestFn fn, void *u);
++int  dns_lazy_committed_digest(const char *name, uint8_t digest[32]);
++
++/* turn lazy mode on for this process (call once, before the threads start) */
++void dns_lazy_init(const DnsLazyConf *c);
++int  dns_lazy_enabled(void);
++const DnsLazyConf *dns_lazy_conf(void);
++
++/* ── resolver side ─────────────────────────────────────────────────────────── */
++/* A query needs `name` (already known OWNED in the namespace). Touches the
++ * LRU, and queues a fetch when absent, past its TTL, or failed and due for a
++ * retry. Returns the state to answer from: READY = serve from the store
++ * (fresh or stale-while-revalidate); LOADING/FAILED = not servable yet.
++ * *age_s (may be NULL) = seconds since the last successful fetch, -1 if none. */
++int  dns_lazy_want(const char *name, int *age_s);
++/* same, for a parked query's re-check (not counted again in hits/misses) */
++int  dns_lazy_want_recheck(const char *name, int *age_s);
++/* Read-only peek (no LRU touch, no fetch). */
++int  dns_lazy_peek(const char *name, int *age_s);
++/* Prefetch hook: queue a fetch now unless held fresh / loading. 1 queued. */
++int  dns_lazy_prefetch(const char *name);
++/* The resolver found the held rows belong to a PREVIOUS owner (transfer):
++ * forget the cache state so the next want re-fetches. */
++void dns_lazy_invalidate(const char *name);
++
++/* ── net side (dns_net.c) ─────────────────────────────────────────────────── */
++/* pop one queued fetch; 1 = name filled */
++int  dns_lazy_pop_request(char name[64]);
++/* push back a request we could not start (fetch table full) */
++void dns_lazy_requeue(const char *name);
++/* is the name of interest (held READY, or LOADING)? inv/dat filter */
++int  dns_lazy_tracked(const char *name);
++/* pinned names (this node's own --name) are never evicted, always AE-paged */
++void dns_lazy_pin(const char *name);
++int  dns_lazy_pinned(const char *name);
++/* a fetch for `name` began / finished. ok: 1 = verified answer(s) admitted
++ * (bytes = held op bytes now, empty = zero records), 0 = no valid answer */
++void dns_lazy_begin(const char *name);
++void dns_lazy_done(const char *name, int ok, int64_t bytes, int empty);
++/* a live update to a cached name changed its held bytes */
++void dns_lazy_bytes(const char *name, int64_t bytes);
++/* over max_names/max_bytes? fill the least-recently-used evictable name
++ * (READY/FAILED, not pinned, not loading) and forget it. 1 = victim */
++int  dns_lazy_evict_one(char victim[64]);
++/* restart: names already in the store are adopted as READY-but-stale
++ * (served at once, re-validated on first use) */
++void dns_lazy_adopt(const char *name, int64_t bytes);
++
++/* status (thread-safe) */
++typedef struct {
++    int     names, ready, loading, failed, queued;
++    int64_t bytes;
++    unsigned long hits, misses, fetch_ok, fetch_fail, evicted, stale_served;
++} DnsLazyStats;
++void dns_lazy_stats(DnsLazyStats *s);
++/* iterate tracked names (status endpoint); cb returns 0 to stop */
++void dns_lazy_each(int (*cb)(void *u, const char *name, int state, int age_s, int64_t bytes), void *u);
++
++#endif /* DNS_LAZY_H */
+diff --git a/dns/src/dns_mesh.h b/dns/src/dns_mesh.h
+new file mode 100644
+index 0000000..40e3ed1
+--- /dev/null
++++ b/dns/src/dns_mesh.h
+@@ -0,0 +1,37 @@
++/* dns_mesh.h — coin-agnostic include of the shared mesh headers.
++ *
++ * The DNS layer is shared by the DogeNet tree (dogenet-mesh, include dir
++ * dogenet/) and the PepeNet / greatdane-node tree (mesh, include dir
++ * pepenet/). Every src/ file includes this instead of naming one coin's dir.
++ * Force one with -DDNS_MESH_DOGENET or -DDNS_MESH_PEPENET; otherwise the
++ * header that is on the include path wins (dogenet first). */
++#ifndef DNS_MESH_H
++#define DNS_MESH_H
++
++#if defined(DNS_MESH_PEPENET)
++#  include "pepenet/state.h"
++#  include "pepenet/wire.h"
++#  include "pepenet/crypto.h"
++#elif defined(DNS_MESH_DOGENET)
++#  include "dogenet/state.h"
++#  include "dogenet/wire.h"
++#  include "dogenet/crypto.h"
++#elif defined(__has_include)
++#  if __has_include("dogenet/state.h")
++#    include "dogenet/state.h"
++#    include "dogenet/wire.h"
++#    include "dogenet/crypto.h"
++#  elif __has_include("pepenet/state.h")
++#    include "pepenet/state.h"
++#    include "pepenet/wire.h"
++#    include "pepenet/crypto.h"
++#  else
++#    error "dns_mesh.h: neither dogenet/state.h nor pepenet/state.h is on the include path"
++#  endif
++#else
++#  include "dogenet/state.h"
++#  include "dogenet/wire.h"
++#  include "dogenet/crypto.h"
++#endif
++
++#endif
+diff --git a/dns/src/dns_net.c b/dns/src/dns_net.c
+index 23a2fe6..e50619e 100644
+--- a/dns/src/dns_net.c
++++ b/dns/src/dns_net.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
++#endif
+ /* dns_net.c — see dns_net.h. */
+ #include "dns_net.h"
+ 
+@@ -7,8 +10,8 @@
+ #include <time.h>
+ #include <unistd.h>
+ 
+-#include "pepenet/wire.h"
+-#include "pepenet/crypto.h"
++#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
++#include "dns_lazy.h"
+ 
+ #define MAX_PEERS   64
+ #define HOLD_SLOTS  64
+@@ -191,6 +194,11 @@ typedef struct {
+     unsigned       good, bad;
+     time_t         use_half_at;
+     int            lowprio, kick, kicked;
++    /* LZ: lazy-fetch per-peer score (local only) */
++    int            lz_inflight;
++    unsigned       lz_ok, lz_fail, lz_bad, lz_stale, lz_empty;
++    int            lazy_peer;      /* peer advertised DNSNET_SVC_LAZY in its version */
++    int64_t        lz_backoff_ms;
+ } Peer;
+ 
+ typedef struct {
+@@ -206,7 +214,9 @@ typedef struct {
+     X(relay) X(relay_l0) X(relay_l1) X(relay_l2) X(relay_l3) X(relay_l4) \
+     X(credit_wait) X(nr_evict) X(nr_evict_young) X(get_hi) X(get_hi_sent) X(inv_wait) X(drain_wait) \
+     X(zdat_ops) X(l5_skip) X(admit_calls) X(admit_new) X(admit_dup) X(batch) X(batch_fail) \
+-    X(in_drop) X(useless) X(useful) X(lowprio) X(kick) X(peer_capped)
++    X(in_drop) X(useless) X(useful) X(lowprio) X(kick) X(peer_capped) \
++    X(lz_fetch) X(lz_ask) X(lz_ok) X(lz_fail) X(lz_forged) X(lz_stale) X(lz_empty) X(lz_pull) X(lz_peer_up) X(lz_ae_skip) X(lz_digest_bad) X(lz_rate_wait) X(lz_timeout) X(lz_evict) \
++    X(lz_inv_skip) X(lz_dat_skip)
+ 
+ static struct {
+     SpState      *st;
+@@ -223,6 +233,7 @@ static struct {
+     uint64_t      ann_head[LANES];
+     uint32_t      blk;                       /* L2: monotonic max-seen tip height */
+     int           min_wait_lane;             /* L3: best lane still waiting for a peer */
++    int           lazy;                      /* LZ: lazy (namespace-only) mode */
+     struct {                                  /* counters for the 10-min line */
+ #define X(n) unsigned long n;
+         COUNTERS(X)
+@@ -328,6 +339,8 @@ static void ecdsa_refill(Peer *p, time_t now) {
+     p->ecdsa_t = now;
+ }
+ 
++static int  lz_adopt_cb(void *u, const char *name);
++static void lz_evict(void);
+ void dnsnet_init(SpState *st, SpChainOracle oracle, int verbose) {
+     memset(&g, 0, sizeof g);
+     if (getentropy(&g_seed, sizeof g_seed) != 0) {
+@@ -349,6 +362,11 @@ void dnsnet_init(SpState *st, SpChainOracle oracle, int verbose) {
+     g.blk = g.o.tip ? g.o.tip(g.o.u) : 0;     /* L2: restart = every name at its burst */
+     g.next_log = time(NULL) + 600;
+     dns_state_cache_attach(st);               /* L10 */
++    g.lazy = dns_lazy_enabled();
++    if (g.lazy) {                             /* LZ: a restart keeps its cache */
++        sp_state_names(st, lz_adopt_cb, NULL);
++        lz_evict();
++    }
+ }
+ 
+ void dnsnet_set_seniority(int (*fn)(const char *name)) { g.senior = fn; }
+@@ -379,6 +397,15 @@ void dnsnet_set_transport(size_t (*pending)(void *peer), void (*drop)(void *peer
+                           int (*is_local)(void *peer)) {
+     g_tr.pending = pending; g_tr.drop = drop; g_tr.is_local = is_local;
+ }
++/* LZ service bit: the transport's view of a peer's version.services. A peer
++ * advertising DNSNET_SVC_LAZY gets no anti-entropy inventory pages from us
++ * (it ignores them). Live relays (dnzinv for changed names) still go to it:
++ * they are how its cached zones learn of edits before the TTL. */
++static int64_t (*g_svc)(void *peer);
++void dnsnet_set_peer_services(int64_t (*fn)(void *peer)) { g_svc = fn; }
++static int peer_is_lazy(const Peer *p) {
++    return g_svc && p->peer && (g_svc(p->peer) & DNSNET_SVC_LAZY);
++}
+ unsigned long dnsnet_counter(const char *name) {
+ #define X(n) if (!strcmp(name, #n)) return g.c.n;
+     COUNTERS(X)
+@@ -561,7 +588,9 @@ static int page_cb(void *u, const char *name) {
+     if (pa->a->count == 0 && !inv_room(pa->p, INV_FRAME)) {   /* L4 */
+         pa->stop = 1; g.c.out_wait++; return 0;
+     }
+-    inv_add(pa->a, name);
++    /* LZ: a lazy node offers only its own (pinned) names: its cache is the
++     * user's browsing, and every full peer already holds those zones */
++    if (!g.lazy || dns_lazy_pinned(name)) inv_add(pa->a, name);
+     snprintf(pa->p->ae_cursor, sizeof pa->p->ae_cursor, "%s", name);
+     pa->left--; g.c.ae_names++;
+     return 1;
+@@ -1082,7 +1111,8 @@ static void hold_service(void) {
+         if (rc == -2) continue;             /* still ahead — keep holding */
+         if (rc == 1 && parsed) {
+             admit_debit(name, &p, g.hold[i].len);
+-            dnsnet_announce(name);
++            if (!g.lazy || dns_lazy_pinned(name)) dnsnet_announce(name);
++            if (g.lazy) dns_lazy_bytes(name, sp_state_sum(g.st, name));
+         }
+         g.hold[i].len = 0;                  /* admitted / rejected / dup — done */
+     }
+@@ -1104,6 +1134,333 @@ static void use_note(Peer *p, int useful) {
+ }
+ 
+ /* ── receive ─────────────────────────────────────────────────────────────────── */
++/* ── LZ: lazy (namespace-only) mode — on-demand zone fetch ───────────────────
++ * A query for an owned name whose zone we do not hold queues a fetch
++ * (dns_lazy.c). Here, on the net thread, a fetch asks LZ_FANOUT peers with the
++ * EXISTING dnzget (the same frame a full node's pull sends; an old node
++ * answers it with its dnzdat exactly as it answers any pull, an empty dump if
++ * it holds nothing). The answer is admitted by the unchanged on_zdat path, so
++ * every op passes sp_state_admit: signature by the namespace's CURRENT owner
++ * (lease-gated) or its §2.2 DNS_SCOPE hot key, the anchor's header hash on our
++ * chain, the per-key anchor order and the 8 KB budget. Forged ops never land.
++ *
++ * Freshness/withholding: there is no zone commitment on chain (gap G3), so a
++ * single peer can serve an OLD but validly signed set, or nothing. A fetch
++ * therefore merges answers from up to LZ_QUORUM peers (LWW: the newest op per
++ * key wins, so ONE honest peer among them is enough), and waits LZ_SETTLE_MS
++ * after the first answer for the others. A peer whose answer differs from the
++ * merged result (stale / withheld) gets a short backoff; a peer whose ops fail
++ * verification gets an exponential one; a timeout asks the next peer.
++ * Backoffs only order which peers we ask (we still ask a backed-off peer when
++ * it is the only one left) — local policy, nothing on the wire, same spirit as
++ * L6 (answers to our own requests are never scored as spam). */
++#ifndef LZ_FANOUT
++#define LZ_FANOUT        2        /* peers asked at once */
++#endif
++#ifndef LZ_QUORUM
++#define LZ_QUORUM        2        /* agreeing-or-merged valid answers that end a fetch */
++#endif
++#ifndef LZ_ASK_MAX
++#define LZ_ASK_MAX       6        /* peers one fetch may try */
++#endif
++#ifndef LZ_SLOTS
++#define LZ_SLOTS         64       /* fetches in flight */
++#endif
++#ifndef LZ_PER_PEER
++#define LZ_PER_PEER      2        /* lazy zgets in flight to one peer */
++#endif
++#ifndef LZ_ASK_TIMEOUT_MS
++#define LZ_ASK_TIMEOUT_MS 3000    /* one peer's answer (PepeNet: <= one GET_COOL_S queue) */
++#endif
++#ifndef LZ_SETTLE_MS
++#define LZ_SETTLE_MS     600      /* after the first valid answer, wait this for the rest */
++#endif
++#ifndef LZ_FETCH_MAX_MS
++#define LZ_START_RATE    32       /* new fetches started per second (token bucket) */
++#define LZ_START_BURST   64
++#define LZ_DIGEST_RETRY  2
++#define LZ_EMPTY_MIN     2        /* distinct "hold nothing" answers for a verified-empty zone */        /* digest-mismatch rounds before FAILED */
++#define LZ_FETCH_MAX_MS  8000     /* no valid answer by then: FAILED (retry later) */
++#endif
++
++typedef struct { uint8_t x[16]; uint32_t n; } LzSum;   /* order-free op-set sum */
++static void lz_sum_add(LzSum *s, const uint8_t id[32]) {
++    for (int i = 0; i < 16; i++) s->x[i] ^= id[i];
++    s->n++;
++}
++enum { LZA_SENT = 1, LZA_OK, LZA_BAD, LZA_TIMEOUT, LZA_EMPTY };
++typedef struct {
++    char    name[SP_NAME_MAX + 1];
++    int64_t start_ms, first_ok_ms;
++    int     nask, ok_n, empty_n, digest_retry;
++    struct { Peer *p; uint32_t gen; int64_t sent_ms; int st; LzSum sum; } ask[LZ_ASK_MAX];
++} LzFetch;
++static LzFetch g_lz[LZ_SLOTS];
++
++static int lz_adopt_cb(void *u, const char *name) {
++    (void)u;
++    dns_lazy_adopt(name, sp_state_sum(g.st, name));
++    return 1;
++}
++static void lz_evict(void) {
++    char v[64]; int r;
++    while ((r = dns_lazy_evict_one(v)) != 0)
++        if (r == 1) { sp_state_drop_name(g.st, v); g.c.lz_evict++; }
++}
++static LzFetch *lz_find(const char *name) {
++    for (int i = 0; i < LZ_SLOTS; i++) if (g_lz[i].name[0] && !strcmp(g_lz[i].name, name)) return &g_lz[i];
++    return NULL;
++}
++static int lz_outstanding(const LzFetch *f) {
++    int k = 0;
++    for (int i = 0; i < f->nask; i++) if (f->ask[i].st == LZA_SENT) k++;
++    return k;
++}
++static int lz_asked(const LzFetch *f, const Peer *p) {
++    for (int i = 0; i < f->nask; i++) if (f->ask[i].p == p && f->ask[i].gen == p->gen) return 1;
++    return 0;
++}
++/* the best peer not yet asked for this fetch; NULL if none can take it now */
++static Peer *lz_pick(const LzFetch *f, int64_t now) {
++    Peer *best = NULL; int64_t bs = 0;
++    for (int i = 0; i < MAX_PEERS; i++) {
++        Peer *p = &g.peers[i];
++        if (!p->used || lz_asked(f, p) || p->lz_inflight >= LZ_PER_PEER) continue;
++        if (!out_room(p, 24 + 1 + SP_NAME_MAX)) continue;
++        if (!pace_ok(p)) continue;            /* PepeNet: P3 pacing (peers answer one zget per GET_COOL_S) */
++        /* swarm: a peer that served real zones before is preferred; one that
++         * often holds nothing (another lazy node) sinks, but is still asked */
++        int64_t sc = (int64_t)p->lz_bad * 64 + (int64_t)p->lz_fail * 8 + (int64_t)p->lz_stale * 2
++                   + (int64_t)(p->lz_empty > 15 ? 15 : p->lz_empty) - (int64_t)(p->lz_ok > 8 ? 8 : p->lz_ok) + 8
++                   + (p->lz_backoff_ms > now ? 1000000 : 0) + (p->lowprio ? 4096 : 0)
++                   + (int64_t)p->lz_inflight;
++        sc = sc * 16 + (int64_t)(rnd64() & 15);            /* random tie-break */
++        if (!best || sc < bs) { best = p; bs = sc; }
++    }
++    return best;
++}
++static int lz_can_ask_more(const LzFetch *f, int64_t now) {
++    return f->nask < LZ_ASK_MAX && lz_pick(f, now) != NULL;
++}
++static int lz_ask(LzFetch *f, int64_t now) {
++    if (f->nask >= LZ_ASK_MAX) return 0;
++    Peer *p = lz_pick(f, now);
++    if (!p) return 0;
++    send_zget(p, f->name); pace_take(p);
++    p->lz_inflight++; g.c.lz_ask++;
++    f->ask[f->nask].p = p; f->ask[f->nask].gen = p->gen; f->ask[f->nask].sent_ms = now;
++    f->ask[f->nask].st = LZA_SENT; memset(&f->ask[f->nask].sum, 0, sizeof f->ask[0].sum);
++    f->nask++;
++    return 1;
++}
++static void lz_backoff(Peer *p, int64_t base_ms, unsigned n, int64_t cap_ms, int64_t now) {
++    int64_t b = base_ms;
++    for (unsigned i = 1; i < n && b < cap_ms; i++) b *= 2;
++    if (b > cap_ms) b = cap_ms;
++    if (now + b > p->lz_backoff_ms) p->lz_backoff_ms = now + b;
++}
++/* the held op-set sum of a name (clear + rows), to judge each answer */
++static int lz_held_cb(void *u, const uint8_t *key, int klen, int op, uint32_t anchor, const uint8_t *blob, int blen) {
++    (void)key; (void)klen; (void)op; (void)anchor;
++    SpStateOp p;
++    if (sp_state_op_parse(blob, blen, &p)) lz_sum_add(u, p.op_id);
++    return 1;
++}
++static void lz_held_sum(const char *name, LzSum *s) {
++    memset(s, 0, sizeof *s);
++    uint8_t *cb; int cl;
++    if (sp_state_clear_get(g.st, name, &cb, &cl)) {
++        SpStateOp p;
++        if (sp_state_op_parse(cb, cl, &p)) lz_sum_add(s, p.op_id);
++        free(cb);
++    }
++    sp_state_iter(g.st, name, lz_held_cb, s);
++}
++static void lz_finish(LzFetch *f, int ok, int64_t now) {
++    if (ok) {
++        LzSum held; lz_held_sum(f->name, &held);
++        for (int i = 0; i < f->nask; i++) {
++            Peer *p = f->ask[i].p;
++            if (f->ask[i].st != LZA_OK || !p->used || p->gen != f->ask[i].gen) continue;
++            if (memcmp(&f->ask[i].sum, &held, sizeof held)) {       /* behind / withheld */
++                p->lz_stale++; g.c.lz_stale++;
++                lz_backoff(p, 10000, 1, 10000, now);
++            } else { p->lz_ok++; if (p->lz_fail) p->lz_fail--; }
++        }
++        int64_t bytes = sp_state_sum(g.st, f->name);
++        dns_lazy_done(f->name, 1, bytes, held.n == 0);
++        g.c.lz_ok++;
++    } else {
++        dns_lazy_done(f->name, 0, 0, 0);
++        g.c.lz_fail++;
++    }
++    for (int i = 0; i < f->nask; i++)                       /* free the per-peer seats */
++        if (f->ask[i].st == LZA_SENT && f->ask[i].p->gen == f->ask[i].gen && f->ask[i].p->lz_inflight > 0)
++            f->ask[i].p->lz_inflight--;
++    f->name[0] = '\0';
++    lz_evict();
++}
++/* A2: zone digest = sha256(sorted op_ids of the held zone, clear op incl.) */
++typedef struct { uint8_t (*id)[32]; int n, cap; } LzIds;
++static int lz_ids_cb(void *u, const uint8_t *key, int klen, int op, uint32_t anchor, const uint8_t *blob, int blen) {
++    (void)key; (void)klen; (void)op; (void)anchor;
++    LzIds *v = u; SpStateOp p;
++    if (!sp_state_op_parse(blob, blen, &p)) return 1;
++    if (v->n == v->cap) {
++        int nc = v->cap ? v->cap * 2 : 32;
++        void *t = realloc(v->id, (size_t)nc * 32); if (!t) return 0;
++        v->id = t; v->cap = nc;
++    }
++    memcpy(v->id[v->n++], p.op_id, 32);
++    return 1;
++}
++static int lz_id_cmp(const void *a, const void *b) { return memcmp(a, b, 32); }
++int dnsnet_zone_digest(const char *name, uint8_t out[32]) {
++    LzIds v = { 0 };
++    uint8_t *cb; int cl;
++    if (g.st && sp_state_clear_get(g.st, name, &cb, &cl)) { lz_ids_cb(&v, NULL, 0, 0, 0, cb, cl); free(cb); }
++    if (g.st) sp_state_iter(g.st, name, lz_ids_cb, &v);
++    if (v.n > 1) qsort(v.id, (size_t)v.n, 32, lz_id_cmp);
++    sp_sha256(v.n ? (const uint8_t *)v.id : (const uint8_t *)"", (size_t)v.n * 32, out);
++    free(v.id);
++    return v.n;
++}
++/* 1 = no commitment known, or the held zone matches it */
++static int lz_digest_final(LzFetch *f) {
++    uint8_t want[32], have[32];
++    if (!dns_lazy_committed_digest(f->name, want)) return 1;
++    dnsnet_zone_digest(f->name, have);
++    if (!memcmp(want, have, 32)) return 1;
++    g.c.lz_digest_bad++;
++    return 0;
++}
++/* quorum reached: with a commitment, a mismatch means every answer so far was
++ * stale/withheld — penalize them and keep asking others (bounded) */
++static int lz_digest_gate(LzFetch *f, int64_t now) {
++    if (lz_digest_final(f)) return 1;
++    for (int i = 0; i < f->nask; i++) if (f->ask[i].st == LZA_OK) {
++        Peer *p = f->ask[i].p;
++        f->ask[i].st = LZA_BAD;
++        if (p->used && p->gen == f->ask[i].gen) { p->lz_stale++; g.c.lz_stale++; lz_backoff(p, 10000, 1, 10000, now); }
++    }
++    f->ok_n = 0; f->first_ok_ms = 0;
++    if (++f->digest_retry > LZ_DIGEST_RETRY || !lz_ask(f, now)) { lz_finish(f, 0, now); return 0; }
++    return 0;
++}
++
++/* end the fetch when it has what it needs (also called on each answer) */
++static void lz_check(LzFetch *f, int64_t now) {
++    int out = lz_outstanding(f);
++    /* keep LZ_FANOUT asks open until we have a quorum of valid answers */
++    while (f->ok_n + out < LZ_QUORUM && lz_ask(f, now)) out++;
++    int more = lz_can_ask_more(f, now);
++    if (f->ok_n >= LZ_QUORUM ||
++        (f->ok_n >= 1 && out == 0 && !more) ||
++        (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS && out == 0) ||
++        (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS + LZ_ASK_TIMEOUT_MS)) {
++        if (lz_digest_gate(f, now)) lz_finish(f, 1, now);
++    } else if (now - f->start_ms >= LZ_FETCH_MAX_MS) {
++        int ok = f->ok_n > 0 || f->empty_n >= LZ_EMPTY_MIN;
++        if (ok && !lz_digest_final(f)) ok = 0;
++        lz_finish(f, ok, now);
++    } else if (f->ok_n == 0 && out == 0 && f->nask > 0 && !more) {
++        /* everyone tried: all said "nothing" = verified-empty (if a digest is
++         * committed it must match the empty set); else nothing valid = FAILED */
++        lz_finish(f, f->empty_n >= LZ_EMPTY_MIN && lz_digest_final(f), now);
++    }
++}
++/* an answer for a name we track arrived; 1 = it answers one of our fetch asks */
++static int lz_on_dat(Peer *from, const char *name, int ops, int rejected, int pending, const LzSum *sum) {
++    LzFetch *f = lz_find(name);
++    if (!f) return 0;
++    int64_t now = now_ms();
++    for (int i = 0; i < f->nask; i++) {
++        if (f->ask[i].p != from || f->ask[i].gen != from->gen || f->ask[i].st != LZA_SENT) continue;
++        if (from->lz_inflight > 0) from->lz_inflight--;
++        if (rejected > 0) {                                  /* forged / unverifiable ops */
++            from->lz_bad++; g.c.lz_forged++;
++            lz_backoff(from, 30000, from->lz_bad, 600000, now);
++        }
++        (void)ops; (void)pending;
++        if (rejected > 0) {
++            /* a peer that served ANY op failing verification is not trusted to
++             * have served the WHOLE zone: its valid (owner-signed) ops still
++             * landed, but its answer never completes a fetch — ask another. If
++             * nobody else answers, the fetch FAILS (EDE 22), so a partial zone
++             * from a forger is never served as if it were complete. */
++            f->ask[i].st = LZA_BAD;
++            lz_ask(f, now);
++        } else if (pending == 2) {
++            /* incomplete answer (the host's per-peer verify budget cut the
++             * dump short; PepeNet ECDSA throttle): not a vote either way, no
++             * penalty -- ask another peer; the leftover arrives on retry */
++            f->ask[i].st = LZA_TIMEOUT;
++            lz_ask(f, now);
++        } else if (sum->n == 0 && ops == 0) {
++            /* holds nothing: NOT a vote that the zone is empty (a lazy peer
++             * that never fetched it answers this too). No penalty; ask the
++             * next. Verified-empty only when every candidate said so. */
++            f->ask[i].st = LZA_EMPTY; f->empty_n++; from->lz_empty++; g.c.lz_empty++;
++            lz_ask(f, now);
++        } else {
++            f->ask[i].st = LZA_OK; f->ask[i].sum = *sum;
++            f->ok_n++; if (from->lz_empty) from->lz_empty--;
++            if (!f->first_ok_ms) f->first_ok_ms = now;
++        }
++        lz_check(f, now);                                    /* quorum: done now, not next tick */
++        return 1;
++    }
++    return 0;
++}
++static void lz_peer_down(Peer *p) {
++    for (int s = 0; s < LZ_SLOTS; s++) {
++        LzFetch *f = &g_lz[s];
++        if (!f->name[0]) continue;
++        for (int i = 0; i < f->nask; i++)
++            if (f->ask[i].p == p && f->ask[i].gen == p->gen && f->ask[i].st == LZA_SENT)
++                f->ask[i].st = LZA_TIMEOUT;                  /* lz_service asks another */
++    }
++    p->lz_inflight = 0;
++}
++static void lz_service(int64_t now) {
++    /* start queued fetches */
++    char nm[64];
++    static double tok = LZ_START_BURST; static int64_t tok_ms;
++    if (tok_ms) { tok += (double)(now - tok_ms) * LZ_START_RATE / 1000.0; if (tok > LZ_START_BURST) tok = LZ_START_BURST; }
++    tok_ms = now;
++    for (int budget = 64; budget > 0; budget--) {
++        if (tok < 1.0) { DnsLazyStats ls_; dns_lazy_stats(&ls_); if (ls_.queued > 0) g.c.lz_rate_wait++; break; }   /* flood: stays LOADING */
++        LzFetch *fr = NULL;
++        for (int i = 0; i < LZ_SLOTS && !fr; i++) if (!g_lz[i].name[0]) fr = &g_lz[i];
++        if (!fr) break;
++        if (!dns_lazy_pop_request(nm)) break;
++        if (!sp_name_valid(nm, strlen(nm)) || lz_find(nm)) continue;
++        memset(fr, 0, sizeof *fr);
++        snprintf(fr->name, sizeof fr->name, "%s", nm);
++        fr->start_ms = now;
++        dns_lazy_begin(nm); g.c.lz_fetch++; tok -= 1.0;
++        for (int k = 0; k < LZ_FANOUT; k++) if (!lz_ask(fr, now)) break;
++    }
++    /* drive fetches in flight */
++    for (int s = 0; s < LZ_SLOTS; s++) {
++        LzFetch *f = &g_lz[s];
++        if (!f->name[0]) continue;
++        for (int i = 0; i < f->nask; i++) {
++            if (f->ask[i].st != LZA_SENT) continue;
++            Peer *p = f->ask[i].p;
++            if (!p->used || p->gen != f->ask[i].gen) { f->ask[i].st = LZA_TIMEOUT; continue; }
++            if (now - f->ask[i].sent_ms >= LZ_ASK_TIMEOUT_MS) {
++                f->ask[i].st = LZA_TIMEOUT; g.c.lz_timeout++;
++                if (p->lz_inflight > 0) p->lz_inflight--;
++                p->lz_fail++;
++                lz_backoff(p, 2000, p->lz_fail, 120000, now);
++            }
++        }
++        lz_check(f, now);
++    }
++}
++
++/* ── receive ──────────────────────────────────────────────────────────────── */
+ static void on_zinv(Peer *from, const uint8_t *pay, int n) {
+     int off = 0; uint64_t count;
+     if (!sp_rvar(pay, n, &off, &count)) return;
+@@ -1118,6 +1475,7 @@ static void on_zinv(Peer *from, const uint8_t *pay, int n) {
+         memcpy(name, pay + off, (size_t)nlen); name[nlen] = '\0'; off += nlen;
+         const uint8_t *their = pay + off; off += 32;
+         if (!sp_name_valid(name, (size_t)nlen)) continue;
++        if (g.lazy && !dns_lazy_tracked(name)) { g.c.lz_inv_skip++; continue; }   /* LZ */
+         uint8_t ours[32];
+         dns_state_digest(g.st, name, ours);
+         if (memcmp(ours, their, 32) != 0) pull_want(from, name, their, now, fresh);
+@@ -1131,6 +1489,16 @@ static void on_zget(Peer *from, const uint8_t *pay, int n) {
+     char name[SP_NAME_MAX + 1];
+     memcpy(name, pay + 1, (size_t)nlen); name[nlen] = '\0';
+     if (!sp_name_valid(name, (size_t)nlen)) return;
++    /* A1 swarm, pull-through: a lazy node asked for an OWNED zone it does not
++     * hold answers (empty, as any node does) and fetches it itself, so the
++     * asker's retry -- and every later asker -- finds a verified copy here.
++     * Bounded by the LZ_START_RATE bucket, the LRU caps and the P7 per-peer
++     * get cooldown below. Local only; no wire change. */
++    if (g.lazy && !dns_lazy_tracked(name)) {
++        uint8_t ow[20];
++        if (g.o.owner_now && g.o.owner_now(g.o.u, name, ow) && dns_lazy_prefetch(name))
++            g.c.lz_pull++;
++    }
+     time_t now = time(NULL);
+     if (from->last_zget && now - from->last_zget < GET_COOL_S) {      /* P7 (unchanged rate) */
+         /* L3: a quiet name's zget is kept (one per peer, newest wins) and
+@@ -1159,7 +1527,10 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
+     uint64_t count;
+     if (!sp_rvar(pay, n, &off, &count)) return;
+     if (count > ZDAT_OPS_MAX) { strike(from, 20, "zdat count"); return; }
+-    int changed = 0, deferred = 0, held = 0, ops = 0, batched = 0, tried = 0;
++    /* LZ: a lazy node stores only names it is fetching or already caches */
++    if (g.lazy && !dns_lazy_tracked(name)) { g.c.lz_dat_skip++; return; }
++    int changed = 0, deferred = 0, held = 0, ops = 0, batched = 0, tried = 0, rejected = 0;
++    LzSum sum; memset(&sum, 0, sizeof sum);
+     time_t retry_at = 0;
+     char err[128];
+     int owner_strikes = 0;
+@@ -1176,8 +1547,9 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
+         /* the frame's name must match the op's (one name per dump) */
+         SpStateOp p;
+         if (!sp_state_op_parse(op, (int)ol, &p) ||
+-            p.name_len != nlen || memcmp(p.name, name, (size_t)nlen) != 0) continue;
++            p.name_len != nlen || memcmp(p.name, name, (size_t)nlen) != 0) { rejected++; continue; }
+         ops++; g.c.zdat_ops++;
++        lz_sum_add(&sum, p.op_id);
+         if (!op_is_new(name, &p)) { g.c.l5_skip++; continue; }   /* L5: unchanged op: skip */
+         time_t ra = 0;
+         if (!admit_gate(name, &p, (int)ol, &ra)) {       /* P4: later, not never */
+@@ -1199,8 +1571,10 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
+         if (rc == 1) { changed = 1; g.c.admit_new++; admit_debit(name, &p, (int)ol); }
+         else if (rc == -1) g.c.admit_dup++;
+         else if (rc == -2) { held = 1; hold_push(op, (int)ol); }
+-        else if (rc == 0 && g.verbose)
+-            fprintf(stderr, "dnsnet: reject %s: %s\n", name, err);
++        else if (rc == 0) {
++            rejected++;
++            if (g.verbose) fprintf(stderr, "dnsnet: reject %s: %s\n", name, err);
++        }
+         if (from && from->ecdsa_tokens <= 0 && i + 1 < count) { leftover = count - i - 1; break; }
+     }
+     if (batched && !sp_state_batch_end(g.st)) { g.c.batch_fail++; changed = 0; }
+@@ -1214,6 +1588,9 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
+     }
+     /* L6: only an UNSOLICITED dump that taught us nothing counts against the
+      * peer — an answer to our own zget costs what our P3 pacing allows. */
++    /* LZ: an answer to a lazy fetch is solicited (never scored as spam); an
++     * ECDSA-throttled (leftover) dump is incomplete: pending = 2 */
++    if (g.lazy && from && lz_on_dat(from, name, ops, rejected, leftover ? 2 : (deferred || held), &sum)) solicited = 1;
+     if (from && from->used)
+         use_note(from, changed ? 1 : (!solicited && ops > 0 && !deferred && !held && !leftover) ? -1 : 0);
+     pull_reap(from, name);
+@@ -1221,7 +1598,8 @@ static void on_zdat(Peer *from, const uint8_t *pay, int n) {
+     if (changed) {
+         /* announce to everyone — including the source: if we also hold ops it
+          * lacked, its digest now mismatches ours and it pulls back. */
+-        dnsnet_announce(name);
++        if (!g.lazy || dns_lazy_pinned(name)) dnsnet_announce(name);   /* LZ: own names only */
++        if (g.lazy) dns_lazy_bytes(name, sp_state_sum(g.st, name));
+     }
+     /* no-change: SILENCE (unchanged PepeNet rule; see dns/test/net_test.c
+      * sec_livelock). Anti-entropy still advertises our digest. */
+@@ -1246,8 +1624,10 @@ void *dnsnet_up(void *peer, dnsnet_send_fn send) {
+             static const char cs[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+             p->ae_cursor[0] = cs[rnd64() % (sizeof cs - 1)];
+             p->ae_cursor[1] = cs[rnd64() % (sizeof cs - 1)]; p->ae_cursor[2] = '\0';
+-            p->ae_left = DNSNET_AE_PAGE;     /* first page of our shelf, on connect */
+             p->ae_next = time(NULL) + AE_PERIOD_S / 2 + (time_t)(rnd64() % AE_PERIOD_S);
++            p->lazy_peer = peer_is_lazy(p);
++            if (p->lazy_peer) { g.c.lz_peer_up++; return p; }   /* LZ bit: no AE pages */
++            p->ae_left = DNSNET_AE_PAGE;     /* first page of our shelf, on connect */
+             ae_page(p);
+             return p;
+         }
+@@ -1282,6 +1662,7 @@ void dnsnet_down(void *handle) {
+         if (!s->nalt && !s->inflight && !s->not_before) pull_free(s);
+     }
+     for (int i = 0; i < 48; i++) if (g.pull[i].p == p) { g.pull[i].p = NULL; g.pull[i].name[0] = '\0'; }
++    lz_peer_down(p);
+     p->used = 0; p->peer = NULL; p->send = NULL; p->inflight = 0; p->hi_get[0] = '\0';
+ }
+ 
+@@ -1327,7 +1708,8 @@ void dnsnet_tick(void) {
+         if (!p->used) continue;
+         if (!p->ae_left && (now >= p->ae_next || p->ae_next - now > 2 * AE_PERIOD_S)) {
+             p->ae_next = now + AE_PERIOD_S;
+-            p->ae_left = DNSNET_AE_PAGE;
++            if (p->lazy_peer) g.c.lz_ae_skip++;     /* LZ bit: this link gets no AE page */
++            else p->ae_left = DNSNET_AE_PAGE;
+         }
+         if (ring_flush_lanes(p, 0, LANE_HI)) {
+             if (p->ae_left) ae_page(p);
+@@ -1347,6 +1729,7 @@ void dnsnet_tick(void) {
+         g.pull_kick = 0; g.last_pull_ms = ms;
+         pull_service(now);
+     }
++    if (g.lazy) lz_service(ms);                     /* LZ: on-demand fetches */
+     if (now != g.last_scan) {                     /* table scans: once a second */
+         g.last_scan = now;
+         blk_observe();
+diff --git a/dns/src/dns_net.h b/dns/src/dns_net.h
+index e714613..9ef2936 100644
+--- a/dns/src/dns_net.h
++++ b/dns/src/dns_net.h
+@@ -67,4 +67,14 @@ void  dnsnet_set_transport(size_t (*pending)(void *peer), void (*drop)(void *pee
+ /* counters by name (tests, status); "blk" = the max-seen tip credit uses */
+ unsigned long dnsnet_counter(const char *name);
+ 
++/* A2: digest of the zone held for name = sha256 over its sorted op_ids
++ * (32 B each, clear op included; empty zone = sha256("")). Returns op count. */
++int dnsnet_zone_digest(const char *name, uint8_t out[32]);
++
++/* LZ service bit (version.services bit 24 = IDX_SVC_DOGENET_LAZY). A lazy
++ * node advertises it; we then send that peer no anti-entropy inventory pages.
++ * fn returns a peer's received services (dnsd: idx_serve_peer_services). */
++#define DNSNET_SVC_LAZY (1LL << 24)
++void dnsnet_set_peer_services(int64_t (*fn)(void *peer));
++
+ #endif /* DNS_NET_H */
+diff --git a/dns/src/dns_state.c b/dns/src/dns_state.c
+index 4cb4d55..dfc3b0b 100644
+--- a/dns/src/dns_state.c
++++ b/dns/src/dns_state.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
++#endif
+ /* dns_state.c — see dns_state.h. */
+ #include "dns_state.h"
+ 
+@@ -10,8 +13,7 @@
+ #include <time.h>
+ #include <unistd.h>
+ 
+-#include "pepenet/wire.h"
+-#include "pepenet/crypto.h"
++#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
+ 
+ static int fail3(char *err, int errlen, const char *m) {
+     if (err && errlen > 0) snprintf(err, (size_t)errlen, "%s", m);
+diff --git a/dns/src/dns_state.h b/dns/src/dns_state.h
+index 2afce11..e0e2667 100644
+--- a/dns/src/dns_state.h
++++ b/dns/src/dns_state.h
+@@ -27,7 +27,7 @@
+ 
+ #include <stdint.h>
+ #include "zone.h"
+-#include "pepenet/state.h"
++#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
+ 
+ #define DNS_SCOPE       0x20    /* §2.2 delegation scope bit for zone ops */
+ #define DNS_BUDGET      8192    /* bytes of held ops per name */
+diff --git a/dns/src/dns_wire.c b/dns/src/dns_wire.c
+index 50864ad..bf29ff1 100644
+--- a/dns/src/dns_wire.c
++++ b/dns/src/dns_wire.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
++#endif
+ /* dns_wire.c — see dns_wire.h. */
+ #include "dns_wire.h"
+ 
+@@ -242,6 +245,28 @@ int dns_resp_add_opt(dns_resp *r, uint16_t udp_payload)
+     return 0;
+ }
+ 
++int dns_resp_add_opt_ede(dns_resp *r, uint16_t udp_payload, uint16_t info_code, const char *text)
++{
++    if (!r->ok) return -1;
++    size_t tl = text ? strlen(text) : 0;
++    if (tl > 200) tl = 200;
++    size_t need = 11 + 4 + 2 + tl;
++    if (r->len + need > r->cap) return -1;
++    uint8_t *p = r->buf + r->len;
++    p[0] = 0x00;
++    put16(p + 1, 41);                  /* TYPE = OPT */
++    put16(p + 3, udp_payload);
++    put32(p + 5, 0);
++    put16(p + 9, (uint16_t)(4 + 2 + tl));   /* RDLEN */
++    put16(p + 11, 15);                 /* OPTION-CODE = EDE (RFC 8914) */
++    put16(p + 13, (uint16_t)(2 + tl)); /* OPTION-LENGTH */
++    put16(p + 15, info_code);
++    if (tl) memcpy(p + 17, text, tl);
++    r->len += need;
++    r->arcount++;
++    return 0;
++}
++
+ size_t dns_resp_finish(dns_resp *r)
+ {
+     if (!r->ok) return 0;
+diff --git a/dns/src/dns_wire.h b/dns/src/dns_wire.h
+index ecc9a43..09b9196 100644
+--- a/dns/src/dns_wire.h
++++ b/dns/src/dns_wire.h
+@@ -96,6 +96,11 @@ int dns_resp_add(dns_resp *r, const char *owner, uint16_t type,
+  * max UDP payload. Call after all answers, before finish. */
+ int dns_resp_add_opt(dns_resp *r, uint16_t udp_payload);
+ 
++/* Same OPT RR carrying one RFC 8914 Extended DNS Error option (code 15):
++ * info_code ‖ UTF-8 extra text (may be NULL/""). Only for EDNS0 queries. */
++enum { DNS_EDE_NOT_READY = 14, DNS_EDE_NO_REACHABLE_AUTHORITY = 22 };
++int dns_resp_add_opt_ede(dns_resp *r, uint16_t udp_payload, uint16_t info_code, const char *text);
++
+ /* Patch ANCOUNT/ARCOUNT (and TC if truncated) into the header. Returns the final
+  * message length, or 0 if the build overflowed the hard buffer. */
+ size_t dns_resp_finish(dns_resp *r);
+diff --git a/dns/src/dnsd.c b/dns/src/dnsd.c
+index 00e42f3..48649f2 100644
+--- a/dns/src/dnsd.c
++++ b/dns/src/dnsd.c
+@@ -30,7 +30,7 @@
+ #include "zone.h"
+ #include "indexer.h"        /* idx_serve + IdxMeshHooks + indexer_main + idx_sync_* */
+ #include "db.h"             /* idx_db_open / idx_db_peers_agent (discovered peers) */
+-#include "pepenet/crypto.h" /* sp_pubkey, sp_name_valid */
++#include "dns_mesh.h"      /* sp_pubkey, sp_name_valid (dogenet/ or pepenet/) */
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -265,6 +265,7 @@ static void *net_main(void *a) {
+ 
+     IdxMeshHooks mesh = { mesh_up, mesh_msg, mesh_down, mesh_tick, NULL, serve_conn_misbehave };
+     dnsnet_set_misbehave(serve_conn_misbehave);
++    dnsnet_set_peer_services(idx_serve_peer_services);   /* LZ bit: no AE pages to lazy peers */
+     idx_serve(na->coin, na->db, na->listen, na->dial, &g_stop, &mesh);
+ 
+     sp_state_close(g_st); dns_chain_close(g_ch);
+diff --git a/dns/src/dnsd_core.c b/dns/src/dnsd_core.c
+index 46bba33..1c4ec2f 100644
+--- a/dns/src/dnsd_core.c
++++ b/dns/src/dnsd_core.c
+@@ -1,8 +1,12 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
++#endif
+ /* dnsd_core.c — the resolver core (see dnsd_core.h). Moved verbatim from
+  * dnsd.c's main-thread half, with the file-scope globals folded into DnsdCore. */
+ #include "dnsd_core.h"
+ #include "dns_wire.h"
+-#include "pepenet/crypto.h"
++#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
++#include "dns_lazy.h"
+ 
+ #include <stdio.h>
+ #include <string.h>
+@@ -53,9 +57,21 @@ static void resp_start(dns_resp *r, uint8_t *out, size_t cap, size_t limit,
+ /* Build the full response for `q` into out[cap]. `over_tcp` lifts the 512/EDNS
+  * UDP budget to the whole buffer (TCP has no such limit). Returns the response
+  * length (a well-formed query always yields at least a header+question). */
++static size_t answer(DnsdCore *dc, const dns_query *q, uint8_t *out, size_t cap,
++                     int over_tcp, int *not_ready);
+ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
+                         uint8_t *out, size_t cap, int over_tcp) {
++    return answer(dc, q, out, cap, over_tcp, NULL);
++}
++size_t dnsd_core_answer_lazy(DnsdCore *dc, const dns_query *q,
++                             uint8_t *out, size_t cap, int over_tcp, int *not_ready) {
++    *not_ready = 0;
++    return answer(dc, q, out, cap, over_tcp, not_ready);
++}
++static size_t answer(DnsdCore *dc, const dns_query *q, uint8_t *out, size_t cap,
++                     int over_tcp, int *not_ready) {
+     dns_resp r;
++    int ede = -1; const char *ede_txt = NULL;
+     size_t budget;
+     if (over_tcp)      budget = cap;
+     else if (q->edns)  budget = q->udp_payload < 512 ? 512
+@@ -88,6 +104,33 @@ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
+                 q->qname, apex, sub[0] ? sub : "@", owned, q->edns, over_tcp);
+     if (!owned) { resp_start(&r, out, cap, limit, q, DNS_RCODE_NXDOMAIN); goto done; }
+ 
++    /* LZ: an owned name's zone may not be here yet. Never NXDOMAIN/empty for
++     * it: serve only a verified fetched zone, else park or signal loading. */
++    if (dc->lazy && dns_lazy_enabled()) {
++        int age = -1, ls = dc->lazy_recheck ? dns_lazy_want_recheck(apex, &age) : dns_lazy_want(apex, &age);
++        if (ls == DNS_LAZY_READY) {
++            uint8_t held[20];                 /* rows of a PREVIOUS owner: re-fetch */
++            if (sp_state_owner(dc->st, apex, held) && memcmp(held, owner, 20) != 0) {
++                dns_lazy_invalidate(apex);
++                ls = dns_lazy_want(apex, &age);
++            }
++        }
++        if (ls != DNS_LAZY_READY) {
++            if (not_ready) { *not_ready = ls; return 0; }
++            resp_start(&r, out, cap, limit, q, DNS_RCODE_SERVFAIL);
++            if (ls == DNS_LAZY_FAILED) {
++                ede = DNS_EDE_NO_REACHABLE_AUTHORITY;
++                ede_txt = "dogenet-lazy: zone fetch failed (no verified answer from any peer); retrying";
++                dc->lazy_failed_sent++;
++            } else {
++                ede = DNS_EDE_NOT_READY;
++                ede_txt = "dogenet-lazy: zone loading; retry";
++                dc->lazy_loading_sent++;
++            }
++            goto done;
++        }
++    }
++
+     zone z; dns_state_zone_owned(dc->st, apex, owner, &z);   /* G1: current owner's rows only */
+     resp_start(&r, out, cap, limit, q, DNS_RCODE_NOERROR);
+ 
+@@ -121,11 +164,13 @@ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
+         resp_start(&r, out, cap, limit, q, DNS_RCODE_NXDOMAIN);
+ 
+ done:;
+-    if (q->edns) dns_resp_add_opt(&r, DNS_MAX_UDP);   /* signal we speak EDNS0 */
++    if (q->edns && ede >= 0) dns_resp_add_opt_ede(&r, DNS_MAX_UDP, (uint16_t)ede, ede_txt);
++    else if (q->edns) dns_resp_add_opt(&r, DNS_MAX_UDP);   /* signal we speak EDNS0 */
+     return dns_resp_finish(&r);
+ }
+ 
+ /* ── transports ──────────────────────────────────────────────────────────────── */
++static int64_t core_ms(void);
+ static void serve_udp(DnsdCore *dc) {
+     uint8_t buf[4096];
+     struct sockaddr_storage cli; socklen_t cl = sizeof cli;
+@@ -134,10 +179,46 @@ static void serve_udp(DnsdCore *dc) {
+     dns_query q;
+     if (dns_parse_query(buf, (size_t)n, &q) != 0) return;
+     uint8_t out[4096];
++    if (dc->lazy && dc->lazy_wait_ms > 0 && (size_t)n <= DNSD_PARK_QMAX) {
++        int nr = 0;
++        size_t rn = dnsd_core_answer_lazy(dc, &q, out, sizeof out, 0, &nr);
++        if (!nr) { if (rn) sendto(dc->ufd, out, rn, 0, (struct sockaddr *)&cli, cl); return; }
++        for (int i = 0; i < DNSD_PARK_MAX; i++)          /* LZ: park it */
++            if (!dc->park[i].used) {
++                DnsdPark *k = &dc->park[i];
++                k->used = 1; k->deadline_ms = core_ms() + dc->lazy_wait_ms;
++                memcpy(&k->cli, &cli, cl); k->cl = (unsigned)cl;
++                k->qlen = (uint16_t)n; memcpy(k->q, buf, (size_t)n);
++                dc->lazy_parked++;
++                return;
++            }
++        /* park table full: answer the loading signal now (below) */
++    }
+     size_t rn = dnsd_core_answer(dc, &q, out, sizeof out, 0);
+     if (rn) sendto(dc->ufd, out, rn, 0, (struct sockaddr *)&cli, cl);
+ }
+ 
++/* LZ: re-try parked UDP queries; answer when ready or at the deadline */
++static int park_service(DnsdCore *dc, int64_t now) {
++    int left = 0;
++
++    for (int i = 0; i < DNSD_PARK_MAX; i++) {
++        DnsdPark *k = &dc->park[i];
++        if (!k->used) continue;
++        dns_query q; uint8_t out[4096]; size_t rn = 0;
++        if (dns_parse_query(k->q, k->qlen, &q) != 0) { k->used = 0; continue; }
++        int nr = 0;
++        dc->lazy_recheck = 1;
++        if (now < k->deadline_ms) rn = dnsd_core_answer_lazy(dc, &q, out, sizeof out, 0, &nr);
++        dc->lazy_recheck = 0;
++        if (nr) { left++; continue; }
++        if (now >= k->deadline_ms) rn = dnsd_core_answer(dc, &q, out, sizeof out, 0);
++        if (rn) sendto(dc->ufd, out, rn, 0, (struct sockaddr *)&k->cli, (socklen_t)k->cl);
++        k->used = 0;
++    }
++    return left;
++}
++
+ /* ── TCP (RFC 7766), non-blocking ─────────────────────────────────────────────
+  * The resolver thread also answers UDP, so TCP must never block it. The old
+  * inline loop (3 s SO_RCVTIMEO per read, served until EOF) let ONE client that
+@@ -220,7 +301,19 @@ static int tcp_answer(DnsdCore *dc, DnsdTcpConn *t) {
+         if (t->in_len < 2 + mlen) break;
+         dns_query q;
+         if (dns_parse_query(t->in + 2, mlen, &q) != 0) return -1;
+-        size_t rn = dnsd_core_answer(dc, &q, out, sizeof out, 1);
++        size_t rn;
++        if (dc->lazy && dc->lazy_wait_ms > 0) {          /* LZ: park the head query */
++            int64_t now = core_ms();
++            int first = !t->park_ms;
++            if (first) t->park_ms = now + dc->lazy_wait_ms;
++            int nr = 0;
++            dc->lazy_recheck = !first;
++            rn = now < t->park_ms ? dnsd_core_answer_lazy(dc, &q, out, sizeof out, 1, &nr) : 0;
++            dc->lazy_recheck = 0;
++            if (nr) { t->last_ms = now; if (first) dc->lazy_parked++; break; }   /* idle clock held */
++            if (now >= t->park_ms) rn = dnsd_core_answer(dc, &q, out, sizeof out, 1);
++            t->park_ms = 0;
++        } else rn = dnsd_core_answer(dc, &q, out, sizeof out, 1);
+         if (rn == 0 || rn > 65535) return -1;
+         t->out = malloc(rn + 2);
+         if (!t->out) return -1;
+@@ -304,7 +397,11 @@ int dnsd_core_poll(DnsdCore *dc, int timeout_ms) {
+         int64_t d = d1 < d2 ? d1 : d2;
+         if (next < 0 || d < next) next = d;
+     }
++    int parked = 0;                                      /* LZ */
++    for (int i = 0; i < DNSD_PARK_MAX && !parked; i++) parked = dc->park[i].used;
++    for (int i = 0; i < DNSD_TCP_MAX && !parked; i++) parked = dc->tcp[i].used && dc->tcp[i].park_ms;
+     int wait = timeout_ms;                               /* wake for the next expiry */
++    if (parked && (wait < 0 || wait > 25)) wait = 25;
+     if (next >= 0) { int64_t left = next - now; if (left < 0) left = 0; if (wait < 0 || left < wait) wait = (int)left; }
+     int pr = poll(pfd, (nfds_t)nf, wait);
+     int served = 0;
+@@ -318,6 +415,16 @@ int dnsd_core_poll(DnsdCore *dc, int timeout_ms) {
+             }
+         }
+     }
++    if (parked) {                                        /* LZ: ready yet? deadline? */
++        static int64_t poked;                            /* keep the net tick brisk (fetch */
++        int64_t pn = core_ms();                          /* timeouts are checked there)   */
++        if (pn - poked >= 100) { dns_lazy_poke(); poked = pn; }
++        park_service(dc, pn);
++        for (int i = 0; i < DNSD_TCP_MAX; i++) {
++            DnsdTcpConn *t = &dc->tcp[i];
++            if (t->used && t->park_ms && !t->out && tcp_answer(dc, t) != 0) tcp_close(t);
++        }
++    }
+     tcp_expire(dc, core_ms());
+     return served;
+ }
+diff --git a/dns/src/dnsd_core.h b/dns/src/dnsd_core.h
+index dafff90..fb948fc 100644
+--- a/dns/src/dnsd_core.h
++++ b/dns/src/dnsd_core.h
+@@ -18,6 +18,7 @@
+ 
+ #include <stdint.h>
+ #include <stddef.h>
++#include <sys/socket.h>
+ 
+ /* TCP DNS clients, served NON-BLOCKING from dnsd_core_poll so a slow, idle or
+  * trickling client can never stall the UDP path. Zero-initialised = no client.
+@@ -31,8 +32,22 @@ typedef struct {
+     int64_t  born_ms, last_ms;         /* monotonic: accept time, last byte in/out */
+     uint8_t  in[2 + DNSD_TCP_QMAX]; size_t in_len;
+     uint8_t *out; size_t out_len, out_off;   /* pending length-prefixed answer */
++    int64_t  park_ms;                  /* LZ: head query parked until this (0 = none) */
+ } DnsdTcpConn;
+ 
++/* LZ (lazy mode): a query whose zone is not fetched yet is PARKED (never
++ * answered NXDOMAIN/empty) until the zone is ready or lazy_wait_ms passes;
++ * then it gets the loading signal (SERVFAIL + EDE 14 "Not Ready"), or EDE 22
++ * when the last fetch found no verified answer. UDP parks live here. */
++#define DNSD_PARK_MAX  64
++#define DNSD_PARK_QMAX 600
++typedef struct {
++    int      used;
++    int64_t  deadline_ms;
++    struct sockaddr_storage cli; unsigned cl;
++    uint16_t qlen; uint8_t q[DNSD_PARK_QMAX];
++} DnsdPark;
++
+ typedef struct {
+     /* caller-owned read handles (open your own connections; WAL-safe) */
+     SpState      *st;               /* the record store */
+@@ -41,6 +56,12 @@ typedef struct {
+     int         tls_redirect;       /* answer A=<ip> for DANE names */
+     uint8_t     tls_redirect_ip[4];
+     int         verbose;
++    /* LZ: lazy mode (dns_lazy_init done by the host). 0 = full mode, unchanged */
++    int         lazy;
++    int         lazy_wait_ms;       /* park a not-ready query up to this (<= 9000) */
++    unsigned long lazy_parked, lazy_loading_sent, lazy_failed_sent;
++    int         lazy_recheck;       /* internal: set while re-checking a parked query */
++    DnsdPark    park[DNSD_PARK_MAX];
+     /* sockets (dnsd_core_bind) */
+     int         ufd, tfd;           /* -1 when unbound / tcp unavailable */
+     DnsdTcpConn tcp[DNSD_TCP_MAX];  /* live TCP clients (core-internal) */
+@@ -62,5 +83,10 @@ void dnsd_core_close(DnsdCore *dc);
+  * full response for `q` into out[cap]; over_tcp lifts the UDP budget. */
+ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
+                         uint8_t *out, size_t cap, int over_tcp);
++/* LZ: the same, but in lazy mode a not-ready zone sets *not_ready to its
++ * DNS_LAZY_* state and returns 0 instead of answering (caller may park and
++ * retry; dnsd_core_answer never parks: it answers the loading signal). */
++size_t dnsd_core_answer_lazy(DnsdCore *dc, const dns_query *q,
++                             uint8_t *out, size_t cap, int over_tcp, int *not_ready);
+ 
+ #endif
+diff --git a/dns/src/zone.c b/dns/src/zone.c
+index e62e75d..949bea2 100644
+--- a/dns/src/zone.c
++++ b/dns/src/zone.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
++#endif
+ /* zone.c — see zone.h. */
+ #include "zone.h"
+ #include "dns_wire.h"
+diff --git a/dns/test/antispam_test.c b/dns/test/antispam_test.c
+index 8dae506..30f7d73 100644
+--- a/dns/test/antispam_test.c
++++ b/dns/test/antispam_test.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp under -std=c11 when CFLAGS is overridden */
++#endif
+ /* antispam_test.c — the local-only anti-spam limits in src/dns_net.c and the
+  * dns_state sweep / G1 helpers, on a fake clock (time() and the ms clock are
+  * both test-driven, so refills are exact and the run is instant).
+diff --git a/dns/test/dnsd_core_test.c b/dns/test/dnsd_core_test.c
+index c62ed78..2826f50 100644
+--- a/dns/test/dnsd_core_test.c
++++ b/dns/test/dnsd_core_test.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp under -std=c11 when CFLAGS is overridden */
++#endif
+ /* dnsd_core_test.c — src/dnsd_core.c's query -> answer path, end to end and
+  * entirely in-process: a real sp_state store (":memory:"), a fake chain oracle,
+  * real records published through dns_state_put, and real wire built by
+diff --git a/dns/test/lazy_test.c b/dns/test/lazy_test.c
+new file mode 100644
+index 0000000..e528ab9
+--- /dev/null
++++ b/dns/test/lazy_test.c
+@@ -0,0 +1,267 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
++#endif
++/* lazy_test.c — LZ (lazy / namespace-only mode), in-process, fake clock.
++ *
++ * PROVEN HERE
++ *   • dns_lazy table: absent -> loading (fetch queued once, deduped), done(ok)
++ *     -> ready; TTL -> stale-while-revalidate (still READY, one re-fetch
++ *     queued); verified-empty uses the short empty TTL; a failed fetch -> FAILED
++ *     and is retried only after fail_retry_s; a failed REFRESH keeps serving the
++ *     old verified zone until max_stale, then LOADING (never NXDOMAIN); LRU
++ *     eviction by last use, bounded by max_names and max_bytes; pinned and
++ *     loading names are never evicted; invalidate (owner change) forgets data;
++ *     a full table answers LOADING, never ABSENT; restart adoption = READY+stale.
++ *   • dnsd_core in lazy mode: an OWNED name whose zone is not fetched answers
++ *     SERVFAIL + EDE 14 (Not Ready) — never NXDOMAIN, never an empty/missing
++ *     TLSA; FAILED answers SERVFAIL + EDE 22; a non-EDNS client gets plain
++ *     SERVFAIL; dnsd_core_answer_lazy reports not-ready without answering (the
++ *     park path); an UNOWNED name is still NXDOMAIN at once; once the zone is
++ *     admitted + done, answers are byte-identical to full mode; rows held for a
++ *     previous owner are not served (re-fetch). Full mode (lazy=0) unchanged. */
++#include "dns_lazy.h"
++#include "dnsd_core.h"
++#include "dns_state.h"
++#include "dns_wire.h"
++#include "zone.h"
++#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static int g_ok, g_fail;
++#define CK(c, m) do { if (c) { g_ok++; printf("  ok   %s\n", m); } \
++                      else { g_fail++; printf("  FAIL %s  (line %d)\n", m, __LINE__); } } while (0)
++
++static int64_t g_ms = 1000000;
++int64_t lz_clock(void) { return g_ms; }
++
++/* ── fake chain ─────────────────────────────────────────────────────────── */
++static uint32_t g_tip = 500;
++static uint8_t  g_owner160[20], g_other160[20];
++static int g_transfer = 0;
++static int fk_owner(void *u, const char *name, uint8_t owner[20]) {
++    (void)u;
++    if (strcmp(name, "dogenet") && strcmp(name, "gpt")) return 0;
++    memcpy(owner, g_transfer && !strcmp(name, "gpt") ? g_other160 : g_owner160, 20);
++    return 1;
++}
++static int fk_header(void *u, uint32_t height, uint8_t out[32]) {
++    (void)u;
++    if (height > g_tip) return 0;
++    uint8_t seed[8] = { 'h','d','r',1, (uint8_t)height, (uint8_t)(height >> 8),
++                        (uint8_t)(height >> 16), (uint8_t)(height >> 24) };
++    sp_sha256(seed, sizeof seed, out);
++    return 1;
++}
++static uint32_t fk_tip(void *u) { (void)u; return g_tip; }
++static SpChainOracle ORC = { NULL, fk_owner, fk_header, fk_tip };
++
++static void p16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
++static uint16_t g16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
++static size_t mkq(uint8_t *b, const char *qname, uint16_t qtype, int edns) {
++    p16(b, 0x1234); p16(b + 2, 0x0100);
++    p16(b + 4, 1); p16(b + 6, 0); p16(b + 8, 0); p16(b + 10, edns ? 1 : 0);
++    size_t o = 12;
++    o += (size_t)dns_encode_name(b + o, 300, qname);
++    p16(b + o, qtype); o += 2; p16(b + o, 1); o += 2;
++    if (edns) { b[o++] = 0; p16(b + o, 41); o += 2; p16(b + o, 1232); o += 2;
++                b[o++] = 0; b[o++] = 0; b[o++] = 0; b[o++] = 0; p16(b + o, 0); o += 2; }
++    return o;
++}
++/* rcode, answer count, EDE info code (-1 none) */
++typedef struct { int rcode, an, ede, opt; char ede_txt[256]; } R;
++static R ask(DnsdCore *dc, const char *qname, uint16_t qtype, int edns) {
++    uint8_t qb[512], out[4096]; R r; memset(&r, 0, sizeof r); r.ede = -1;
++    size_t ql = mkq(qb, qname, qtype, edns);
++    dns_query q;
++    if (dns_parse_query(qb, ql, &q)) { r.rcode = -1; return r; }
++    size_t n = dnsd_core_answer(dc, &q, out, sizeof out, 0);
++    if (n < 12) { r.rcode = -2; return r; }
++    r.rcode = out[3] & 15; r.an = g16(out + 6);
++    int ar = g16(out + 10);
++    size_t o = 12;
++    while (out[o]) o += out[o] + 1u;
++    o += 5;
++    for (int i = 0; i < r.an; i++) {
++        if ((out[o] & 0xC0) == 0xC0) o += 2; else { while (out[o]) o += out[o] + 1u; o++; }
++        o += 8; uint16_t rl = g16(out + o); o += 2 + rl;
++    }
++    for (int i = 0; i < ar && o < n; i++) {
++        o++;                                   /* root name */
++        uint16_t t = g16(out + o); uint16_t rl = g16(out + o + 8); o += 10;
++        if (t == 41) {
++            r.opt = 1;
++            size_t e = o + rl;
++            while (o + 4 <= e) {
++                uint16_t code = g16(out + o), ol = g16(out + o + 2);
++                if (code == 15 && ol >= 2) {
++                    r.ede = g16(out + o + 4);
++                    int tl = ol - 2; if (tl > 255) tl = 255;
++                    memcpy(r.ede_txt, out + o + 6, (size_t)tl); r.ede_txt[tl] = 0;
++                }
++                o += 4u + ol;
++            }
++            o = e;
++        } else o += rl;
++    }
++    return r;
++}
++
++static void testkey(const char *seed, uint8_t priv[32], uint8_t pub[33]) {
++    sp_sha256((const uint8_t *)seed, strlen(seed), priv);
++    while (!sp_pubkey(priv, pub)) sp_sha256(priv, 32, priv);
++}
++
++int main(void) {
++    char nm[64];
++    printf("== dns_lazy table ==\n");
++    DnsLazyConf c; dns_lazy_conf_default(&c);
++    c.max_names = 16; c.max_bytes = 1 << 20; c.ttl_s = 300; c.empty_ttl_s = 60;
++    c.max_stale_s = 3600; c.fail_retry_s = 5;
++    dns_lazy_init(&c);
++    CK(dns_lazy_enabled(), "enabled after init");
++    int age;
++    CK(dns_lazy_want("alpha", &age) == DNS_LAZY_LOADING && age == -1, "absent name -> LOADING, no age");
++    CK(dns_lazy_want("alpha", NULL) == DNS_LAZY_LOADING, "second want still LOADING");
++    CK(dns_lazy_pop_request(nm) && !strcmp(nm, "alpha"), "one fetch queued");
++    CK(!dns_lazy_pop_request(nm), "deduped: no second request");
++    CK(dns_lazy_tracked("alpha"), "loading name is tracked (inv/dat accepted)");
++    CK(!dns_lazy_tracked("beta"), "untouched name is not tracked (gossip ignored)");
++    dns_lazy_begin("alpha");
++    dns_lazy_done("alpha", 1, 500, 0);
++    CK(dns_lazy_want("alpha", &age) == DNS_LAZY_READY && age == 0, "done(ok) -> READY, age 0");
++    CK(!dns_lazy_pop_request(nm), "fresh: no re-fetch");
++    g_ms += 301 * 1000;
++    CK(dns_lazy_want("alpha", &age) == DNS_LAZY_READY && age == 301, "past TTL: still READY (stale-while-revalidate)");
++    CK(dns_lazy_pop_request(nm) && !strcmp(nm, "alpha"), "past TTL: one re-fetch queued");
++    dns_lazy_begin("alpha");
++    CK(dns_lazy_want("alpha", NULL) == DNS_LAZY_READY, "refresh in flight: old verified zone still served");
++    dns_lazy_done("alpha", 0, 0, 0);
++    CK(dns_lazy_want("alpha", NULL) == DNS_LAZY_READY, "refresh FAILED: old zone served (within max_stale)");
++    CK(!dns_lazy_pop_request(nm), "failed: no retry before fail_retry_s");
++    g_ms += 6000;
++    dns_lazy_want("alpha", NULL);
++    CK(dns_lazy_pop_request(nm), "failed: retried after fail_retry_s");
++    dns_lazy_begin("alpha"); dns_lazy_done("alpha", 0, 0, 0);
++    g_ms += 3600 * 1000;
++    CK(dns_lazy_want("alpha", NULL) == DNS_LAZY_LOADING, "beyond max_stale with refresh failing: LOADING (re-fetch), not served");
++    CK(dns_lazy_pop_request(nm), "beyond max_stale: re-fetch queued");
++    dns_lazy_begin("alpha"); dns_lazy_done("alpha", 1, 400, 0);
++
++    CK(dns_lazy_want("gamma", NULL) == DNS_LAZY_LOADING, "gamma loading");
++    dns_lazy_pop_request(nm); dns_lazy_begin("gamma"); dns_lazy_done("gamma", 0, 0, 0);
++    CK(dns_lazy_want("gamma", NULL) == DNS_LAZY_FAILED, "fetch failed with no data -> FAILED");
++    g_ms += 6000;
++    CK(dns_lazy_want("gamma", NULL) == DNS_LAZY_LOADING, "FAILED retried by the next query -> LOADING");
++    dns_lazy_pop_request(nm); dns_lazy_begin("gamma"); dns_lazy_done("gamma", 1, 0, 1);
++    CK(dns_lazy_want("gamma", NULL) == DNS_LAZY_READY, "verified-empty zone READY");
++    g_ms += 61 * 1000;
++    dns_lazy_want("gamma", NULL);
++    CK(dns_lazy_pop_request(nm) && !strcmp(nm, "gamma"), "verified-empty uses the short empty TTL");
++    dns_lazy_begin("gamma"); dns_lazy_done("gamma", 1, 0, 1);
++
++    /* LRU */
++    dns_lazy_pin("mine");
++    for (int i = 0; i < 30; i++) {
++        char n[16]; snprintf(n, sizeof n, "n%02d", i);
++        g_ms += 10;
++        dns_lazy_want(n, NULL); dns_lazy_pop_request(nm); dns_lazy_begin(n); dns_lazy_done(n, 1, 100, 0);
++        char v[64]; while (dns_lazy_evict_one(v)) {}
++    }
++    DnsLazyStats st; dns_lazy_stats(&st);
++    CK(st.names <= 16, "LRU keeps <= max_names zones");
++    CK(dns_lazy_peek("n29", NULL) == DNS_LAZY_READY, "most recent name kept");
++    CK(dns_lazy_peek("n00", NULL) == DNS_LAZY_ABSENT, "least recent name evicted");
++    CK(dns_lazy_pinned("mine"), "pinned name survives eviction");
++    dns_lazy_want("n20", NULL);                     /* touch -> recent */
++    g_ms += 10;
++    dns_lazy_want("zz1", NULL); dns_lazy_pop_request(nm); dns_lazy_begin("zz1"); dns_lazy_done("zz1", 1, 100, 0);
++    { char v[64]; while (dns_lazy_evict_one(v)) {} }
++    CK(dns_lazy_peek("n20", NULL) == DNS_LAZY_READY, "a touched name moves to the LRU head");
++    dns_lazy_want("ld1", NULL); dns_lazy_pop_request(nm); dns_lazy_begin("ld1");
++    for (int i = 0; i < 40; i++) { char n[16]; snprintf(n, sizeof n, "m%02d", i); g_ms += 10;
++        dns_lazy_want(n, NULL); dns_lazy_pop_request(nm); dns_lazy_begin(n); dns_lazy_done(n, 1, 100, 0);
++        char v[64]; while (dns_lazy_evict_one(v)) {} }
++    CK(dns_lazy_tracked("ld1"), "a LOADING name is never evicted");
++    dns_lazy_done("ld1", 1, 100, 0);
++    /* bytes bound */
++    for (int i = 0; i < 8; i++) { char n[16]; snprintf(n, sizeof n, "big%d", i); g_ms += 10;
++        dns_lazy_want(n, NULL); dns_lazy_pop_request(nm); dns_lazy_begin(n); dns_lazy_done(n, 1, 300000, 0);
++        char v[64]; while (dns_lazy_evict_one(v)) {} }
++    dns_lazy_stats(&st);
++    CK(st.bytes <= (1 << 20), "LRU keeps held bytes <= max_bytes");
++    dns_lazy_invalidate("big7");
++    CK(dns_lazy_peek("big7", NULL) != DNS_LAZY_READY, "invalidate (owner change) forgets the data");
++    dns_lazy_adopt("restart1", 200);
++    CK(dns_lazy_want("restart1", NULL) == DNS_LAZY_READY, "adopted (restart) zone served at once");
++    int q = 0; while (dns_lazy_pop_request(nm)) if (!strcmp(nm, "restart1")) q = 1;
++    CK(q, "adopted zone is stale: re-validated on first use");
++    /* table full: never ABSENT for want */
++    DnsLazyConf c2 = c; c2.max_names = 16; dns_lazy_init(&c2);
++    int bad = 0;
++    for (int i = 0; i < 2000; i++) { char n[16]; snprintf(n, sizeof n, "f%04d", i);
++        int s = dns_lazy_want(n, NULL); if (s == DNS_LAZY_ABSENT || s == DNS_LAZY_READY) bad++; }
++    CK(!bad, "2000 distinct wants with a 16-zone table: always LOADING (never absent/ready-empty)");
++
++    printf("== dnsd_core lazy answers ==\n");
++    dns_lazy_init(&c);
++    uint8_t OPRIV[32], OPUB[33]; testkey("owner", OPRIV, OPUB);
++    sp_hash160(OPUB, 33, g_owner160);
++    uint8_t xp[32], xpub[33]; testkey("other", xp, xpub); sp_hash160(xpub, 33, g_other160);
++    SpState *st0 = sp_state_open(":memory:");
++    DnsdCore dc; memset(&dc, 0, sizeof dc);
++    dc.st = st0; dc.oracle = ORC; dc.suffix = "doge"; dc.ufd = dc.tfd = -1;
++    dc.lazy = 1; dc.lazy_wait_ms = 3000;
++    R r = ask(&dc, "www.dogenet.doge", 1, 1);
++    CK(r.rcode == 2 && r.ede == 14 && r.an == 0, "owned, not fetched: SERVFAIL + EDE 14 Not Ready");
++    CK(strstr(r.ede_txt, "loading") != NULL, "EDE extra text says loading");
++    r = ask(&dc, "_443._tcp.dogenet.doge", 52, 1);
++    CK(r.rcode == 2 && r.ede == 14, "TLSA while loading: SERVFAIL/EDE14, never NXDOMAIN or empty");
++    r = ask(&dc, "www.dogenet.doge", 1, 0);
++    CK(r.rcode == 2 && !r.opt, "non-EDNS client: plain SERVFAIL (no OPT)");
++    r = ask(&dc, "nope.doge", 1, 1);
++    CK(r.rcode == 3, "unowned name: NXDOMAIN at once (namespace says so)");
++    { uint8_t qb[512], out[4096]; size_t ql = mkq(qb, "www.dogenet.doge", 1, 1); dns_query qq;
++      dns_parse_query(qb, ql, &qq); int nr = 0;
++      size_t n = dnsd_core_answer_lazy(&dc, &qq, out, sizeof out, 0, &nr);
++      CK(n == 0 && nr == DNS_LAZY_LOADING, "answer_lazy: not-ready -> park (no answer built)"); }
++    CK(dns_lazy_pop_request(nm) && !strcmp(nm, "dogenet"), "the query queued exactly one fetch");
++    while (dns_lazy_pop_request(nm)) {}
++    dns_lazy_begin("dogenet"); dns_lazy_done("dogenet", 0, 0, 0);
++    r = ask(&dc, "www.dogenet.doge", 1, 1);
++    CK(r.rcode == 2 && r.ede == 22, "fetch failed: SERVFAIL + EDE 22 No Reachable Authority");
++    /* the fetch lands: publish + done */
++    zone_rec rec; memset(&rec, 0, sizeof rec);
++    snprintf(rec.label, sizeof rec.label, "www"); rec.type = 1; rec.ttl = 300; rec.rdlen = 4;
++    rec.rdata[0] = 192; rec.rdata[1] = 0; rec.rdata[2] = 2; rec.rdata[3] = 7;
++    char err[128];
++    CK(dns_state_put(st0, &ORC, "dogenet", &rec, OPRIV, OPUB, SP_CERT_NONE, NULL, 0, err, sizeof err) == 1, "zone admitted");
++    dns_lazy_done("dogenet", 1, sp_state_sum(st0, "dogenet"), 0);
++    r = ask(&dc, "www.dogenet.doge", 1, 1);
++    CK(r.rcode == 0 && r.an == 1 && r.ede == -1 && r.opt, "ready: NOERROR, 1 A, plain OPT");
++    r = ask(&dc, "nothere.dogenet.doge", 1, 1);
++    CK(r.rcode == 3, "ready: unknown label NXDOMAIN (same as full mode)");
++    DnsdCore full = dc; full.lazy = 0;
++    uint8_t qb[512], o1[4096], o2[4096]; size_t ql = mkq(qb, "www.dogenet.doge", 1, 1); dns_query qq;
++    dns_parse_query(qb, ql, &qq);
++    size_t n1 = dnsd_core_answer(&dc, &qq, o1, sizeof o1, 0), n2 = dnsd_core_answer(&full, &qq, o2, sizeof o2, 0);
++    CK(n1 == n2 && !memcmp(o1, o2, n1), "ready lazy answer byte-identical to full mode");
++    /* previous-owner rows */
++    CK(dns_state_put(st0, &ORC, "gpt", &rec, OPRIV, OPUB, SP_CERT_NONE, NULL, 0, err, sizeof err) == 1, "gpt zone admitted");
++    dns_lazy_want("gpt", NULL); while (dns_lazy_pop_request(nm)) {}
++    dns_lazy_begin("gpt"); dns_lazy_done("gpt", 1, 100, 0);
++    g_transfer = 1;
++    r = ask(&dc, "www.gpt.doge", 1, 1);
++    CK(r.rcode == 2 && r.ede == 14, "transfer: previous owner's rows not served; re-fetch (loading)");
++    q = 0; while (dns_lazy_pop_request(nm)) if (!strcmp(nm, "gpt")) q = 1;
++    CK(q, "transfer: re-fetch queued");
++    g_transfer = 0;
++    /* full mode untouched */
++    DnsdCore f2; memset(&f2, 0, sizeof f2); f2.st = sp_state_open(":memory:"); f2.oracle = ORC; f2.suffix = "doge";
++    r = ask(&f2, "www.dogenet.doge", 1, 1);
++    CK(r.rcode == 3 && r.ede == -1, "full mode (lazy=0): empty store -> NXDOMAIN exactly as before");
++    printf("%d ok, %d failed\n", g_ok, g_fail);
++    return g_fail ? 1 : 0;
++}
+diff --git a/dns/test/net_test.c b/dns/test/net_test.c
+index a6d8ee5..d6b4367 100644
+--- a/dns/test/net_test.c
++++ b/dns/test/net_test.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp under -std=c11 when CFLAGS is overridden */
++#endif
+ /* net_test.c — src/dns_net.c, the gossip layer, under an ADVERSARIAL peer.
+  *
+  * state_dns_test already walks the happy path (one inv → get → dat cycle over
+diff --git a/dns/test/state_dns_test.c b/dns/test/state_dns_test.c
+index 0b46138..9a0360d 100644
+--- a/dns/test/state_dns_test.c
++++ b/dns/test/state_dns_test.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp under -std=c11 when CFLAGS is overridden */
++#endif
+ /* state_dns_test.c — the DNS overlay over sp_state, in isolation:
+  * key/payload codecs, publish→zone→del→clear, the 8 KB budget, digests, the
+  * expiry sweep, and a two-node gossip convergence run over an in-memory wire
+diff --git a/dns/test/wire_test.c b/dns/test/wire_test.c
+index 1ac57bc..73d909c 100644
+--- a/dns/test/wire_test.c
++++ b/dns/test/wire_test.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp under -std=c11 when CFLAGS is overridden */
++#endif
+ /* wire_test.c — src/dns_wire.c, the network-facing RFC 1035 codec, under
+  * adversarial load. This is the only module in the repo that parses bytes an
+  * unauthenticated stranger chose, so it is tested as an attack surface, not as
+diff --git a/dns/test/zone_test.c b/dns/test/zone_test.c
+index bb60f1b..af78bce 100644
+--- a/dns/test/zone_test.c
++++ b/dns/test/zone_test.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp under -std=c11 when CFLAGS is overridden */
++#endif
+ /* zone_test.c — src/zone.c (the zone-file / record-text front door) and the
+  * sp_state record key it feeds (dns_key_pack/unpack in src/dns_state.c).
+  *
+diff --git a/indexer/src/indexer.h b/indexer/src/indexer.h
+index a1fd701..c77a92f 100644
+--- a/indexer/src/indexer.h
++++ b/indexer/src/indexer.h
+@@ -190,6 +190,17 @@ typedef struct {
+ size_t idx_serve_peer_pending(void *peer);
+ void   idx_serve_peer_kick(void *peer, const char *why);
+ int    idx_serve_peer_exempt(void *peer);
++//   services: the peer's version.services as received (0 until seen)
++int64_t idx_serve_peer_services(void *peer);
++
++// version.services bit a LAZY (namespace-only) DNS node advertises: bit 24, in
++// the Bitcoin-lineage experimental range 24..31 (Core and old nodes ignore it).
++// Peers that see it stop paging anti-entropy inventory to that link.
++#define IDX_SVC_DOGENET_LAZY (1LL << 24)
++extern int64_t idx_serve_extra_services;   // ORed into our advertised services
++// Optional: read end of a non-blocking pipe; a byte written to it wakes the
++// serve loop so mesh->tick runs at once (-1 = none, the default).
++extern int idx_serve_wake_fd;
+ 
+ /* Overlay / serve local-policy strike: add `n` to this SConn's score; at 100
+  * ban the IPv4 24 h and drop the conn. `peer` is the SConn* from peer_up. */
+diff --git a/indexer/src/sync.c b/indexer/src/sync.c
+index 2386b4f..bbe991c 100644
+--- a/indexer/src/sync.c
++++ b/indexer/src/sync.c
+@@ -2142,6 +2142,9 @@ void idx_serve_peer_kick(void *peer, const char *why) {
+     fprintf(stderr, "serve: %s dropped by the mesh carrier (%s)\n",
+             sc->peer[0] ? sc->peer : "(peer)", why ? why : "-");
+ }
++int64_t idx_serve_peer_services(void *peer) {      // version.services as received (0 till seen)
++    return peer ? ((SConn *)peer)->peer_svc : 0;
++}
+ int idx_serve_peer_exempt(void *peer) {
+     SConn *sc = (SConn *)peer;
+     if (sc->outbound) return 1;                      // a seat we chose to dial
+@@ -2989,6 +2992,16 @@ static int sock_last_err(void) {
+ // The chain-wire presence (indexer.h). port 0 = dial-only. `dial_peers` =
+ // comma host:port list kept connected. `mesh` non-NULL carries carrier gossip
+ // as dn* commands on pepenet peers.
++// Optional wake pipe (read end, O_NONBLOCK) a host may set before idx_serve
++// starts: a byte written to it ends the serve loop's 1 s poll at once, so the
++// next pass runs mesh->tick now (lazy mode: a query just queued a zone
++// fetch). -1 = none (default; behaviour unchanged). Local only.
++int idx_serve_wake_fd = -1;
++
++// Extra version.services bits a host ORs in before idx_serve starts (lazy
++// mode sets IDX_SVC_DOGENET_LAZY). 0 = unchanged. Old peers ignore unknown bits.
++int64_t idx_serve_extra_services = 0;
++
+ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
+               const char *dial_peers, volatile int *stop, const IdxMeshHooks *mesh) {
+     ignore_sigpipe();
+@@ -3033,7 +3046,7 @@ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
+                           (int)(slash - dbpath), dbpath, coinname);
+       else snprintf(serve_path, sizeof serve_path, "serve-%s.db", coinname); }
+     ServeStore *ss = serve_store_open(serve_path);
+-    int64_t services = (ss && serve_store_tip(ss) >= 0) ? (1LL << 10) : 0;
++    int64_t services = ((ss && serve_store_tip(ss) >= 0) ? (1LL << 10) : 0) | idx_serve_extra_services;
+     int64_t our_h = 0; { uint8_t tip[32]; idx_db_load_sync(db, &our_h, tip); }
+     if (port) fprintf(stderr, "serve: listening on 0.0.0.0:%u (agent %s, services 0x%llx)\n",
+                       port, idx_sync_agent, (unsigned long long)services);
+@@ -3255,7 +3268,7 @@ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
+         for (int i = 0; i < SERVE_MAX_CONN; i++)        // L6: closes the carrier asked for
+             if (conns[i].fd >= 0 && conns[i].mesh_kick) serve_drop(&conns[i], mesh);
+ 
+-        struct pollfd pfd[SERVE_MAX_CONN + 1]; int map[SERVE_MAX_CONN + 1]; int np = 0;
++        struct pollfd pfd[SERVE_MAX_CONN + 2]; int map[SERVE_MAX_CONN + 2]; int np = 0;
+         if (lfd >= 0) { pfd[np].fd = lfd; pfd[np].events = POLLIN; map[np] = -1; np++; }
+         for (int i = 0; i < SERVE_MAX_CONN; i++)
+             if (conns[i].fd >= 0) {
+@@ -3263,7 +3276,12 @@ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
+                 pfd[np].events = POLLIN | ((conns[i].connecting || serve_out_pending(&conns[i])) ? POLLOUT : 0);
+                 map[np] = i; np++;
+             }
++        int wk = -1;                                     // optional host wake pipe (last; map -2)
++        if (idx_serve_wake_fd >= 0) { wk = np; pfd[np].fd = idx_serve_wake_fd; pfd[np].events = POLLIN; map[np] = -2; np++; }
+         if (poll(pfd, np, 1000) <= 0) continue;
++        if (wk >= 0 && (pfd[wk].revents & POLLIN)) {      // drain; the next pass runs mesh->tick
++            char wb[64]; while (read(idx_serve_wake_fd, wb, sizeof wb) > 0) {}
++        }
+         int start = 0;
+         if (lfd >= 0 && (pfd[0].revents & POLLIN)) {
+           for (;;) {
+diff --git a/mesh/test/net_test.c b/mesh/test/net_test.c
+index c7a3b70..a98409a 100644
+--- a/mesh/test/net_test.c
++++ b/mesh/test/net_test.c
+@@ -1,3 +1,6 @@
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE 1   /* mkstemp under -std=c11 when CFLAGS is overridden */
++#endif
+ // net_test.c — self-test battery for pepenet-mesh.
+ //
+ // Proves the shared substrate end-to-end with REAL data: the dev key
+@@ -12,6 +15,7 @@
+ #include "pepenet/view.h"
+ 
+ #include <stdio.h>
++#include <stdlib.h>     /* mkstemp */
+ #include <string.h>
+ #include <unistd.h>
+ 
+diff --git a/src/dnsnet.c b/src/dnsnet.c
+index c4050f7..8c8cd5d 100644
+--- a/src/dnsnet.c
++++ b/src/dnsnet.c
+@@ -17,12 +17,14 @@
+ #include "dns_chain.h"      // the lease-gated chain oracle
+ #include "dns_net.h"        // zone gossip over the chain wire
+ #include "dnsd_core.h"      // the extracted resolver
++#include "dns_lazy.h"       // lazy node: zones on demand (resolver park, svc bit)
+ #include "indexer.h"        // idx_serve + IdxMeshHooks (the chain-wire transport)
+ #include "db.h"             // idx_db_open / idx_db_peers_agent (discovered pepenet peers)
+ #include "pepenet/view.h"   // test-mode ownership (PEPENET_DNS_TEST)
+ #include "pepenet/crypto.h"
+ 
+ #include <libgen.h>
++#include <sys/stat.h>
+ #include <pthread.h>
+ #include <unistd.h>
+ #include <stdio.h>
+@@ -211,6 +213,12 @@ static void conf_read(const char *path) {
+     fclose(f);
+ }
+ 
++// lazy mode: where the zone cache store lives ("" = <data>/dns-<coin>.db)
++static char g_lazy_cache_dir[400];
++void dnsnet_set_lazy_cache_dir(const char *dir) {
++    snprintf(g_lazy_cache_dir, sizeof g_lazy_cache_dir, "%s", dir ? dir : "");
++}
++
+ int dnsnet_boot(const char *coin, const char *chain_dbpath) {
+     snprintf(g->coin, sizeof g->coin, "%s", coin);
+     snprintf(g->chain_db, sizeof g->chain_db, "%s", chain_dbpath);
+@@ -222,6 +230,10 @@ int dnsnet_boot(const char *coin, const char *chain_dbpath) {
+     snprintf(dbdup, sizeof dbdup, "%s", chain_dbpath);
+     const char *dir = dirname(dbdup);
+     snprintf(g->store_db, sizeof g->store_db, "%s/dns-%s.db", dir, coin);
++    if (dns_lazy_enabled() && g_lazy_cache_dir[0]) {     // lazy: zone cache store elsewhere
++        mkdir(g_lazy_cache_dir, 0700);
++        snprintf(g->store_db, sizeof g->store_db, "%s/lazy-zones-%s.db", g_lazy_cache_dir, coin);
++    }
+     snprintf(g->conf, sizeof g->conf, "%s/dns-%s.conf", dir, coin);
+ 
+     conf_write_default(g->conf);
+@@ -459,6 +471,9 @@ static void *net_main(void *arg) {
+ 
+     IdxMeshHooks mesh = { mesh_up, mesh_msg, mesh_down, mesh_tick, NULL, serve_conn_misbehave };
+     dnsnet_set_misbehave(serve_conn_misbehave);
++    dnsnet_set_peer_services(idx_serve_peer_services);   // LZ bit: no AE pages to lazy peers
++    if (dns_lazy_enabled() && !getenv("GREATDANE_NODE_LAZY_NO_SVC_BIT"))
++        idx_serve_extra_services |= IDX_SVC_DOGENET_LAZY; // version.services bit 24
+     if (g->listen)
+         fprintf(stderr, "dnsnet: listening on chain port %u (inbound + crawl-discoverable)\n", g->listen);
+     idx_serve(g->coin, g->chain_db, g->listen /* 0 = dial-only */, dial, &g->stop, &mesh);
+@@ -479,6 +494,7 @@ static void *res_main(void *arg) {
+     dc->tls_redirect = 1;                       // steer DANE names at the proxy
+     dc->tls_redirect_ip[0] = 127; dc->tls_redirect_ip[3] = 1;
+     dc->ufd = dc->tfd = -1;
++    if (dns_lazy_enabled()) { dc->lazy = 1; dc->lazy_wait_ms = dns_lazy_conf()->wait_ms; }   // park, never NXDOMAIN
+ 
+     while (!g->stop && !oracle_open(&g->res_ch, &g->res_tvw, &dc->oracle))
+         for (int i = 0; i < 10 && !g->stop; i++) usleep(100000);
+@@ -509,6 +525,7 @@ static void *res_main(void *arg) {
+         dc53->tls_redirect = 1;
+         dc53->tls_redirect_ip[0] = 127; dc53->tls_redirect_ip[3] = 1;
+         dc53->ufd = dc53->tfd = -1;
++        if (dns_lazy_enabled()) { dc53->lazy = 1; dc53->lazy_wait_ms = dns_lazy_conf()->wait_ms; }
+         int up = oracle_open(&g->res_ch53, &g->res_tvw53, &dc53->oracle);
+         if (up) {
+             dc53->st = sp_state_open(g->store_db);
+diff --git a/src/dnsnet.h b/src/dnsnet.h
+index 1bca645..7274731 100644
+--- a/src/dnsnet.h
++++ b/src/dnsnet.h
+@@ -53,6 +53,8 @@ void dnsnet_stop(void);         // stop + join both
+ typedef struct Dnsnet Dnsnet;
+ struct AppInstance;
+ void dnsnet_use_chain_db(const char *db);
++// lazy mode only: zone cache store = <dir>/lazy-zones-<coin>.db (call before start)
++void dnsnet_set_lazy_cache_dir(const char *dir);
+ Dnsnet *dnsnet_start_inst(const struct AppInstance *inst);
+ 
+ void dnsnet_status(DnsStatus *out);
+diff --git a/src/gd_node.c b/src/gd_node.c
+index f7a6eb0..f66822a 100644
+--- a/src/gd_node.c
++++ b/src/gd_node.c
+@@ -9,6 +9,8 @@
+ #include "wallet.h"
+ #include "platform.h"
+ #include "indexer.h"        /* idx_serve_listen_status: local status only */
++#include "dns_lazy.h"       /* lazy node (namespace-only sync, zones on demand) */
++#include <fcntl.h>
+ 
+ #include <errno.h>
+ #include <signal.h>
+@@ -139,6 +141,9 @@ static void json_safe(char *dst, size_t cap, const char *src) {
+     dst[o] = 0;
+ }
+ 
++static int g_lazy_wake_w = -1;
++static void lazy_kick(void) { if (g_lazy_wake_w >= 0) { char b = 1; (void)!write(g_lazy_wake_w, &b, 1); } }
++
+ /* One status line (no trailing newline). Field set is append-only: older
+  * readers ignore the new keys. */
+ static void build_status(char *out, size_t cap, const char *coin, const char *dir) {
+@@ -165,6 +170,11 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
+                       : ph <= 0 ? "connecting"
+                       : es.height + 2 < ph ? "syncing" : "ready";
+     char dd[600]; json_safe(dd, sizeof dd, dir);
++    /* lazy: namespace_synced = the ownership fold is at the peer tip, so every
++     * owned name answers (READY or "loading"), never a false "unowned" */
++    int ns_synced = es.height > 0 && ph > 0 && es.height + 2 >= ph;
++    DnsLazyStats lz; memset(&lz, 0, sizeof lz);
++    if (dns_lazy_enabled()) dns_lazy_stats(&lz);
+     snprintf(out, cap,
+         "{\"event\":\"status\",\"coin\":\"%s\",\"height\":%lld,"
+         "\"peer_height\":%lld,\"activation\":%lld,\"engine\":%d,"
+@@ -173,24 +183,45 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
+         "\"dane_fail\":%lld,\"listen\":\"%s\",\"listen_port\":%d,"
+         "\"listen_errno\":%d,\"listen_error\":\"%s\","
+         "\"state\":\"%s\",\"sync_pct\":%.1f,\"peers_in\":%d,\"peers_out\":%d,"
+-        "\"data_dir\":\"%s\"}",
++        "\"data_dir\":\"%s\",\"lazy\":%d,\"namespace_synced\":%s,"
++        "\"zones_cached\":%d,\"zones_loading\":%d,\"zones_failed\":%d}",
+         coin, (long long)es.height, (long long)es.peer_height,
+         (long long)es.activation, es.running, es.pass_active,
+         (long long)es.passes, ptotal, pmesh, (long long)ws.conns,
+         (long long)ws.dane_ok, (long long)ws.dane_fail,
+-        lname, lport, lerr, lmsg, state, pct, pin, pout, dd);
++        lname, lport, lerr, lmsg, state, pct, pin, pout, dd,
++        dns_lazy_enabled(), ns_synced ? "true" : "false", lz.names, lz.loading, lz.failed);
+ }
+ 
+ int main(int argc, char **argv) {
+     const char *data = NULL, *only = NULL, *seeds = NULL;
+     const char *snap_dir = NULL, *snap_pin = NULL;   /* idx-04 */
+-    int ephemeral = 0, stdio_ctl = 0, dane_api = 0, listen_port = -1;
++    int ephemeral = 0, stdio_ctl = 0, dane_api = 0, listen_port = -1, lazy = 0;
++    DnsLazyConf lc; dns_lazy_conf_default(&lc);
++    const char *lazy_dir = NULL;
++    /* env first (GREATDANE_NODE_LAZY_*), flags override */
++    { const char *e;
++      if ((e = getenv("GREATDANE_NODE_LAZY_MAX_NAMES"))  && *e) lc.max_names = atoi(e);
++      if ((e = getenv("GREATDANE_NODE_LAZY_MAX_MB"))     && *e) lc.max_bytes = (int64_t)atoi(e) << 20;
++      if ((e = getenv("GREATDANE_NODE_LAZY_TTL"))        && *e) lc.ttl_s = atoi(e);
++      if ((e = getenv("GREATDANE_NODE_LAZY_EMPTY_TTL"))  && *e) lc.empty_ttl_s = atoi(e);
++      if ((e = getenv("GREATDANE_NODE_LAZY_MAX_STALE"))  && *e) lc.max_stale_s = atoi(e);
++      if ((e = getenv("GREATDANE_NODE_LAZY_WAIT_MS"))    && *e) lc.wait_ms = atoi(e);
++      if ((e = getenv("GREATDANE_NODE_LAZY_CACHE_DIR"))  && *e) lazy_dir = e; }
+     for (int i = 1; i < argc; i++) {
+         if (!strcmp(argv[i], "--data") && i + 1 < argc) data = argv[++i];
+         else if (!strcmp(argv[i], "--only") && i + 1 < argc) only = argv[++i];
+         else if (!strcmp(argv[i], "--ephemeral-ports")) ephemeral = 1;
+         else if (!strcmp(argv[i], "--dane-api")) dane_api = 1;
+         else if (!strcmp(argv[i], "--stdio")) stdio_ctl = 1;
++        else if (!strcmp(argv[i], "--lazy")) lazy = 1;
++        else if (!strcmp(argv[i], "--lazy-max-names") && i + 1 < argc) lc.max_names = atoi(argv[++i]);
++        else if (!strcmp(argv[i], "--lazy-max-mb") && i + 1 < argc) lc.max_bytes = (int64_t)atoi(argv[++i]) << 20;
++        else if (!strcmp(argv[i], "--lazy-ttl") && i + 1 < argc) lc.ttl_s = atoi(argv[++i]);
++        else if (!strcmp(argv[i], "--lazy-wait-ms") && i + 1 < argc) lc.wait_ms = atoi(argv[++i]);
++        else if (!strcmp(argv[i], "--lazy-empty-ttl") && i + 1 < argc) lc.empty_ttl_s = atoi(argv[++i]);
++        else if (!strcmp(argv[i], "--lazy-max-stale") && i + 1 < argc) lc.max_stale_s = atoi(argv[++i]);
++        else if (!strcmp(argv[i], "--lazy-cache-dir") && i + 1 < argc) lazy_dir = argv[++i];
+         else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) seeds = argv[++i];
+         else if (!strcmp(argv[i], "--no-listen")) listen_port = 0;
+         else if (!strcmp(argv[i], "--snapshot") && i + 1 < argc) snap_dir = argv[++i];
+@@ -205,10 +236,34 @@ int main(int argc, char **argv) {
+         }
+         else {
+             fprintf(stderr, "usage: greatdane-node --data <dir> --only pep|doge [--ephemeral-ports] [--dane-api] [--stdio] [--seeds host[:port],...]\n"
+-                            "       [--listen-port N | --no-listen] [--snapshot <dir> [--snapshot-sha256 <hex>]]\n");
++                            "       [--listen-port N | --no-listen] [--snapshot <dir> [--snapshot-sha256 <hex>]]\n"
++                            "       [--lazy (or env GREATDANE_NODE_LAZY=1) [--lazy-max-names N] [--lazy-max-mb N]\n"
++                            "        [--lazy-ttl S] [--lazy-empty-ttl S] [--lazy-max-stale S] [--lazy-wait-ms MS]\n"
++                            "        [--lazy-cache-dir DIR]]  (env GREATDANE_NODE_LAZY_{MAX_NAMES,MAX_MB,TTL,EMPTY_TTL,\n"
++                            "        MAX_STALE,WAIT_MS,CACHE_DIR}; flags win)\n");
+             return 2;
+         }
+     }
++    { const char *e = getenv("GREATDANE_NODE_LAZY"); if (e && e[0] == '1') lazy = 1; }
++    if (lazy) {
++        /* namespace-only sync; zones fetched on demand and verified. Must run
++         * before dnsnet_start_inst (dnsnet adopts the cache store at init).
++         * The zone cache is the node's normal store under --data. */
++        dns_lazy_init(&lc);
++        if (lazy_dir && lazy_dir[0]) dnsnet_set_lazy_cache_dir(lazy_dir);
++        /* wake the serve loop the moment a lookup queues a fetch (else <= 1 s) */
++        static int wk[2] = { -1, -1 };
++        if (pipe(wk) == 0) {
++            fcntl(wk[0], F_SETFL, O_NONBLOCK); fcntl(wk[1], F_SETFL, O_NONBLOCK);
++            g_lazy_wake_w = wk[1]; idx_serve_wake_fd = wk[0];
++            dns_lazy_set_kick(lazy_kick);
++        }
++        fprintf(stderr, "greatdane-node: LAZY mode max_names=%d max_mb=%lld ttl=%ds empty_ttl=%ds max_stale=%ds wait=%dms cache_dir=%s svc_bit=0x%llx\n",
++                dns_lazy_conf()->max_names, (long long)(dns_lazy_conf()->max_bytes >> 20), dns_lazy_conf()->ttl_s,
++                dns_lazy_conf()->empty_ttl_s, dns_lazy_conf()->max_stale_s, dns_lazy_conf()->wait_ms,
++                lazy_dir && lazy_dir[0] ? lazy_dir : "(data dir)",
++                getenv("GREATDANE_NODE_LAZY_NO_SVC_BIT") ? 0ULL : (unsigned long long)IDX_SVC_DOGENET_LAZY);
++    }
+     if (!data || !data[0]) {
+         fprintf(stderr, "greatdane-node: --data is required (this process never uses ~/.pepenet)\n");
+         return 2;
+diff --git a/src/webproxy.c b/src/webproxy.c
+index 25c8f90..f4b19c1 100644
+--- a/src/webproxy.c
++++ b/src/webproxy.c
+@@ -375,12 +375,27 @@ static void splice_raw(int a, int b) {
+ // ---- GreatDANE M3 (opt-in, --dane-api): the browser verifies DANE itself. ---
+ // The node never terminates TLS in this mode: CONNECT splices raw TCP to the
+ // chain A record, and GET /gd/tlsa?host= hands the browser the on-chain TLSA.
++/* lazy node: how long /gd/tlsa and a passthrough CONNECT wait for a cold
++ * zone before answering "loading" (GREATDANE_NODE_LAZY_WAIT_MS, 0..9000,
++ * default 3000 -- well inside Dane's 10 s budget). */
++static int gd_lazy_wait_ms(void) {
++    static int v = -1;
++    if (v < 0) {
++        const char *e = getenv("GREATDANE_NODE_LAZY_WAIT_MS");
++        int x = e && *e ? atoi(e) : 3000;
++        v = x < 0 ? 0 : x > 9000 ? 9000 : x;
++    }
++    return v;
++}
++
+ static const char *res_name(int rc) {
+     switch (rc) {
+     case RES_OK: return "ok";
+     case RES_UNOWNED: return "unowned";
+     case RES_NO_TLSA: return "no_tlsa";
+     case RES_BAD_RECORD: return "bad_record";
++    case RES_LOADING:
++    case RES_FETCH_FAILED: return "loading";     /* lazy node: owned, zone not here yet */
+     default: return "bad_name";
+     }
+ }
+@@ -420,10 +435,14 @@ static void tlsa_api(int cfd, const char *q) {
+     } else {
+         OriginInfo oi;
+         memset(&oi, 0, sizeof oi);
+-        int rc = resolver_lookup(host, &oi, g->rv);
++        int rc = resolver_lookup_wait(host, &oi, g->rv, gd_lazy_wait_ms());
+         bn = snprintf(body, sizeof body,
+                       "{\"host\":\"%s\",\"status\":\"%s\",\"height\":%lld,\"peer_height\":%lld",
+                       host, res_name(rc), (long long)h, (long long)ph);
++        if (rc == RES_LOADING || rc == RES_FETCH_FAILED)      /* same codes dnsd puts on the wire */
++            bn += snprintf(body + bn, sizeof body - bn,
++                           ",\"rcode\":\"SERVFAIL\",\"ede\":%d,\"phase\":\"%s\",\"retry_ms\":1000",
++                           rc == RES_LOADING ? 14 : 22, rc == RES_LOADING ? "fetching" : "fetch_failed");
+         if (rc == RES_OK) {
+             char hex[129];
+             for (size_t i = 0; i < oi.assoc_len && i < 64; i++)
+@@ -727,7 +746,14 @@ static void pac_conn(int cfd) {
+         if (g->passthrough) {               // M3: raw TCP to the chain origin
+             OriginInfo oi;
+             memset(&oi, 0, sizeof oi);
+-            int rc = g->rv ? resolver_lookup(target, &oi, g->rv) : RES_BAD_NAME;
++            int rc = g->rv ? resolver_lookup_wait(target, &oi, g->rv, gd_lazy_wait_ms()) : RES_BAD_NAME;
++            if (rc == RES_LOADING || rc == RES_FETCH_FAILED) {   /* lazy: retryable, not a 404 */
++                static const char ld[] = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n"
++                                         "X-GreatDANE-Status: loading\r\nContent-Length: 0\r\n"
++                                         "Connection: close\r\n\r\n";
++                fd_write_all(cfd, ld, sizeof ld - 1);
++                return;
++            }
+             if (rc != RES_OK) { http_status(cfd, "404 Not Found"); return; }
+             ofd = dial_origin(oi.host, oi.port);
+         } else {
+diff --git a/tls/src/resolve.c b/tls/src/resolve.c
+index 1222499..c50beae 100644
+--- a/tls/src/resolve.c
++++ b/tls/src/resolve.c
+@@ -4,12 +4,14 @@
+ 
+ #include "dns_state.h"   /* SpState + dns_state_zone (the live zone) */
+ #include "dns_chain.h"   /* the lease-gated ownership oracle */
++#include "dns_lazy.h"    /* lazy node: per-name zone state (thread-safe) */
+ 
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <stdio.h>
+ #include <pthread.h>
++#include <time.h>
+ 
+ struct Resolver {
+     char   suffix[16];
+@@ -111,9 +113,30 @@ int resolver_resolve(const char *sni, OriginInfo *out, void *ud) {
+     return ok;
+ }
+ 
+-int resolver_lookup(const char *sni, OriginInfo *out, void *ud) {
++/* lazy gate: owned apex whose zone is not READY -> LOADING / FETCH_FAILED.
++ * recheck=1 does not count a new miss (a waiting request polling). */
++static int lazy_gate(Resolver *r, const char *sni, int recheck) {
++    if (!dns_lazy_enabled()) return RES_OK;
++    char apex[64], sub[128];
++    if (!origin_split(sni, r->suffix, apex, sizeof apex, sub, sizeof sub)) return RES_OK;
++    for (char *c = apex; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 'a' - 'A';
++    pthread_mutex_lock(&r->mu);
++    uint8_t owner[20], held[20];
++    int owned = r->orc.owner_now(r->orc.u, apex, owner);
++    int stale_owner = owned && sp_state_owner(r->st, apex, held) && memcmp(held, owner, 20) != 0;
++    pthread_mutex_unlock(&r->mu);
++    if (!owned) return RES_OK;                      /* resolver_lookup says UNOWNED */
++    if (stale_owner) dns_lazy_invalidate(apex);     /* rows of a previous owner: refetch */
++    int s = recheck ? dns_lazy_want_recheck(apex, NULL) : dns_lazy_want(apex, NULL);
++    if (s == DNS_LAZY_READY) return RES_OK;
++    return s == DNS_LAZY_FAILED ? RES_FETCH_FAILED : RES_LOADING;
++}
++
++static int lookup_impl(const char *sni, OriginInfo *out, void *ud, int recheck) {
+     Resolver *r = ud;
+     if (!r || !sni || !out) return RES_BAD_NAME;
++    int lz = lazy_gate(r, sni, recheck);
++    if (lz != RES_OK) return lz;
+     if (resolver_resolve(sni, out, ud)) return RES_OK;
+     char apex[64], sub[128];
+     if (!origin_split(sni, r->suffix, apex, sizeof apex, sub, sizeof sub))
+@@ -134,3 +157,21 @@ int resolver_lookup(const char *sni, OriginInfo *out, void *ud) {
+     pthread_mutex_unlock(&r->mu);
+     return has ? RES_BAD_RECORD : RES_NO_TLSA;
+ }
++
++int resolver_lookup(const char *sni, OriginInfo *out, void *ud) {
++    return lookup_impl(sni, out, ud, 0);
++}
++
++int resolver_lookup_wait(const char *sni, OriginInfo *out, void *ud, int wait_ms) {
++    int rc = lookup_impl(sni, out, ud, 0);
++    struct timespec t0, t, d = { 0, 25 * 1000000L };
++    clock_gettime(CLOCK_MONOTONIC, &t0);
++    while (rc == RES_LOADING && wait_ms > 0) {
++        clock_gettime(CLOCK_MONOTONIC, &t);
++        if ((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000 >= wait_ms) break;
++        nanosleep(&d, NULL);
++        dns_lazy_poke();                 /* net tick checks fetch timeouts: keep it brisk */
++        rc = lookup_impl(sni, out, ud, 1);
++    }
++    return rc;
++}
+diff --git a/tls/src/resolve.h b/tls/src/resolve.h
+index 2494b3e..0fe3975 100644
+--- a/tls/src/resolve.h
++++ b/tls/src/resolve.h
+@@ -31,7 +31,15 @@ void resolver_sync(Resolver *r, int64_t *height, int64_t *peer_height);
+ /* GreatDANE (additive): resolver_resolve plus WHY it refused. Same gate,
+  * same answer on RES_OK (fills *out); never relaxes resolver_resolve. */
+ enum { RES_OK = 0, RES_BAD_NAME = 1, RES_UNOWNED = 2, RES_NO_TLSA = 3,
+-       RES_BAD_RECORD = 4 };
++       RES_BAD_RECORD = 4,
++       /* lazy node (dns_lazy enabled): the name IS owned but its zone is not
++        * fetched/verified yet. Never reported as UNOWNED/NO_TLSA/BAD_RECORD. */
++       RES_LOADING = 5,        /* fetch in flight            (dnsd: SERVFAIL + EDE 14) */
++       RES_FETCH_FAILED = 6 }; /* no verified answer, retrying (dnsd: SERVFAIL + EDE 22) */
+ int resolver_lookup(const char *sni, OriginInfo *out, void *ud);
+ 
++/* resolver_lookup, but while the result is RES_LOADING re-check every 25 ms
++ * for up to wait_ms (lazy mode only; full mode = resolver_lookup). */
++int resolver_lookup_wait(const char *sni, OriginInfo *out, void *ud, int wait_ms);
++
+ #endif

@@ -1,8 +1,11 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* dnsd_core.c — the resolver core (see dnsd_core.h). Moved verbatim from
  * dnsd.c's main-thread half, with the file-scope globals folded into DnsdCore. */
 #include "dnsd_core.h"
 #include "dns_wire.h"
-#include "dogenet/crypto.h"
+#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
 #include "dns_lazy.h"
 
 #include <stdio.h>

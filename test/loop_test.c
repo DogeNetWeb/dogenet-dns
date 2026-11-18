@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* loop_test.c — two INDEPENDENT dns_net instances (dns_net.c compiled twice,
  * symbols renamed A_/B_, time() faked) over an in-memory wire. Measures the
  * digest-mismatch exchange when one side cannot admit the other's ops.

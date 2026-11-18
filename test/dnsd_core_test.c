@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* dnsd_core_test.c — src/dnsd_core.c's query -> answer path, end to end and
  * entirely in-process: a real sp_state store (":memory:"), a fake chain oracle,
  * real records published through dns_state_put, and real wire built by

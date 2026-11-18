@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* dns_wire.c — see dns_wire.h. */
 #include "dns_wire.h"
 

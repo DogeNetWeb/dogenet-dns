@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* dns_chain_test.c — the lease gate runs on chain MTP, never wall clock. */
 #include "dns_chain.h"
 #include <sqlite3.h>

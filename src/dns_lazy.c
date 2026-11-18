@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* dns_lazy.c — see dns_lazy.h. One mutex-guarded open-addressing table of
  * tracked names + a small request ring; no allocation after init. */
 #include "dns_lazy.h"

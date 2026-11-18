@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* lazy_test.c — LZ (lazy / namespace-only mode), in-process, fake clock.
  *
  * PROVEN HERE
@@ -21,7 +24,7 @@
 #include "dns_state.h"
 #include "dns_wire.h"
 #include "zone.h"
-#include "dogenet/crypto.h"
+#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
 
 #include <stdio.h>
 #include <stdlib.h>

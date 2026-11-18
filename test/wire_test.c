@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* wire_test.c — src/dns_wire.c, the network-facing RFC 1035 codec, under
  * adversarial load. This is the only module in the repo that parses bytes an
  * unauthenticated stranger chose, so it is tested as an attack surface, not as

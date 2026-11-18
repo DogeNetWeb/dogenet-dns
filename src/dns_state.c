@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* dns_state.c — see dns_state.h. */
 #include "dns_state.h"
 
@@ -10,8 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "dogenet/wire.h"
-#include "dogenet/crypto.h"
+#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
 
 static int fail3(char *err, int errlen, const char *m) {
     if (err && errlen > 0) snprintf(err, (size_t)errlen, "%s", m);

@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* dnsd.c — the dogenet-dns node: a first-class CHAIN peer that gossips DNS.
  *
  * A dogenet node speaks the host chain's P2P protocol on the chain port; the DNS
@@ -31,7 +34,7 @@
 #include "zone.h"
 #include "indexer.h"        /* idx_serve + IdxMeshHooks + indexer_main + idx_sync_* */
 #include "db.h"             /* idx_db_open / idx_db_peers_agent (discovered peers) */
-#include "dogenet/crypto.h" /* sp_pubkey, sp_name_valid */
+#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +58,7 @@
 size_t idx_serve_peer_pending(void *peer) __attribute__((weak));
 void   idx_serve_peer_kick(void *peer, const char *why) __attribute__((weak));
 int    idx_serve_peer_exempt(void *peer) __attribute__((weak));
+int64_t idx_serve_peer_services(void *peer) __attribute__((weak));
 
 #define PASS_PAUSE_S 20        /* doge/pep blocks ~1/min; a pass ends when caught up */
 
@@ -149,13 +153,14 @@ static void ctl_dispatch(char *req, char *resp, int rmax) {
                  "+OK lazy=%d ready=%d tip=%lld peer_tip=%lld ns_synced=%d peers=%d cached=%d bytes=%lld "
                  "zready=%d loading=%d failed=%d queued=%d hits=%lu misses=%lu stale_served=%lu "
                  "fetch_ok=%lu fetch_fail=%lu evicted=%lu forged=%lu stale_peer=%lu timeout=%lu "
-                 "empty_peer=%lu digest_bad=%lu rate_wait=%lu digest_pins=%d\n",
+                 "empty_peer=%lu digest_bad=%lu rate_wait=%lu digest_pins=%d svc_bit=%d lazy_peers_seen=%lu ae_skipped=%lu\n",
                  dns_lazy_enabled(), synced != 0 && peers > 0 && h > 0, (long long)h, (long long)ph, synced, peers,
                  ls.names, (long long)ls.bytes, ls.ready, ls.loading, ls.failed, ls.queued, ls.hits, ls.misses,
                  ls.stale_served, ls.fetch_ok, ls.fetch_fail, ls.evicted,
                  dnsnet_counter("lz_forged"), dnsnet_counter("lz_stale"), dnsnet_counter("lz_timeout"),
                  dnsnet_counter("lz_empty"), dnsnet_counter("lz_digest_bad"), dnsnet_counter("lz_rate_wait"),
-                 g_digest_file ? 1 : 0);
+                 g_digest_file ? 1 : 0, (idx_serve_extra_services & IDX_SVC_DOGENET_LAZY) ? 1 : 0,
+                 dnsnet_counter("lz_peer_up"), dnsnet_counter("lz_ae_skip"));
         return;
     }
     if (!strcasecmp(cmd, "DIGEST")) {                       /* A2: held-zone digest per name */
@@ -378,6 +383,7 @@ static void *net_main(void *a) {
     dnsnet_set_seniority(name_senior);        /* kept for API compat; L2 lanes replace P10 */
     if (idx_serve_peer_pending && idx_serve_peer_kick && idx_serve_peer_exempt)   /* L6/L7 (weak, see top) */
         dnsnet_set_transport(idx_serve_peer_pending, idx_serve_peer_kick, idx_serve_peer_exempt);
+    if (idx_serve_peer_services) dnsnet_set_peer_services(idx_serve_peer_services);   /* LZ bit */
 
     IdxMeshHooks mesh = { mesh_up, mesh_msg, mesh_down, mesh_tick, NULL };
     idx_serve(na->coin, na->db, na->listen, na->dial, &g_stop, &mesh);
@@ -444,6 +450,8 @@ static int usage(const char *p) {
         "  --lazy             LAZY mode: sync the namespace only; fetch zones from\n"
         "                     peers on demand, verify, cache (env DOGENET_LAZY=1 or\n"
         "                     GREATDANE_NODE_LAZY=1)\n"
+        "  --lazy-no-svc-bit   lazy, but do NOT advertise version.services bit 24\n"
+        "                     (A/B tests; full peers then page AE inventory to us)\n"
         "  --lazy-digest-file <f>  \"<name> <sha256 hex>\" pins: a fetched zone must\n"
         "                     match (stand-in for an on-chain digest commitment)\n"
         "  --lazy-cache-dir <dir>  lazy cache store = <dir>/lazy-zones.db (if no --store)\n"
@@ -462,7 +470,7 @@ int main(int argc, char **argv) {
     const char *db = NULL, *store = NULL, *keyarg = NULL, *name = NULL, *zonef = NULL;
     const char *dns_addr = "127.0.0.1", *ctl_path = NULL, *coin = "doge", *sync_peer = "auto";
     int dns_port = 5353, do_sync = 1;
-    int lazy = 0; const char *lazy_dir = NULL;                 /* LZ */
+    int lazy = 0, lazy_no_bit = 0; const char *lazy_dir = NULL;   /* LZ */
     DnsLazyConf lc; dns_lazy_conf_default(&lc);
     uint16_t chain_port = 0;
     char peers[16][96]; int n_peers = 0;
@@ -511,6 +519,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--lazy-max-stale") && i+1 < argc) lc.max_stale_s = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lazy-wait-ms") && i+1 < argc) lc.wait_ms = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lazy-digest-file") && i+1 < argc) g_digest_file = argv[++i];
+        else if (!strcmp(argv[i], "--lazy-no-svc-bit")) lazy_no_bit = 1;
         else if (!strcmp(argv[i], "-v")) g_verbose = 1;
         else return usage(argv[0]);
     }
@@ -525,6 +534,9 @@ int main(int argc, char **argv) {
     if (lazy) {
         dns_lazy_init(&lc);
         if (g_digest_file) dns_lazy_set_digest_oracle(digest_file_lookup, NULL);
+        /* advertise the lazy service bit (version.services bit 24) unless told
+         * not to (--lazy-no-svc-bit: for A/B measurement and old-peer tests) */
+        if (!lazy_no_bit) idx_serve_extra_services |= IDX_SVC_DOGENET_LAZY;
         /* wake the serve loop the moment a query queues a fetch (else <= 1 s) */
         if (pipe(g_wake) == 0) {
             fcntl(g_wake[0], F_SETFL, O_NONBLOCK); fcntl(g_wake[1], F_SETFL, O_NONBLOCK);

@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* dns_net.c — see dns_net.h. */
 #include "dns_net.h"
 
@@ -7,8 +10,7 @@
 #include <unistd.h>
 #include <time.h>
 
-#include "dogenet/wire.h"
-#include "dogenet/crypto.h"
+#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
 #include "dns_lazy.h"
 
 #define MAX_PEERS   64
@@ -185,6 +187,7 @@ typedef struct {
     /* LZ: lazy-fetch per-peer score (local only) */
     int            lz_inflight;
     unsigned       lz_ok, lz_fail, lz_bad, lz_stale, lz_empty;
+    int            lazy_peer;      /* peer advertised DNSNET_SVC_LAZY in its version */
     int64_t        lz_backoff_ms;
 } Peer;
 
@@ -202,7 +205,7 @@ typedef struct {
     X(credit_wait) X(nr_evict) X(nr_evict_young) X(get_hi) X(inv_wait) X(drain_wait) \
     X(zdat_ops) X(l5_skip) X(admit_calls) X(admit_new) X(admit_dup) X(batch) X(batch_fail) \
     X(in_drop) X(useless) X(useful) X(lowprio) X(kick) X(peer_capped) \
-    X(lz_fetch) X(lz_ask) X(lz_ok) X(lz_fail) X(lz_forged) X(lz_stale) X(lz_empty) X(lz_pull) X(lz_digest_bad) X(lz_rate_wait) X(lz_timeout) X(lz_evict) \
+    X(lz_fetch) X(lz_ask) X(lz_ok) X(lz_fail) X(lz_forged) X(lz_stale) X(lz_empty) X(lz_pull) X(lz_peer_up) X(lz_ae_skip) X(lz_digest_bad) X(lz_rate_wait) X(lz_timeout) X(lz_evict) \
     X(lz_inv_skip) X(lz_dat_skip)
 
 static struct {
@@ -399,6 +402,15 @@ int dnsnet_peer_cap_for_uplink(double mbit) {
 void dnsnet_set_transport(size_t (*pending)(void *peer), void (*drop)(void *peer, const char *why),
                           int (*is_local)(void *peer)) {
     g_tr.pending = pending; g_tr.drop = drop; g_tr.is_local = is_local;
+}
+/* LZ service bit: the transport's view of a peer's version.services. A peer
+ * advertising DNSNET_SVC_LAZY gets no anti-entropy inventory pages from us
+ * (it ignores them). Live relays (dnzinv for changed names) still go to it:
+ * they are how its cached zones learn of edits before the TTL. */
+static int64_t (*g_svc)(void *peer);
+void dnsnet_set_peer_services(int64_t (*fn)(void *peer)) { g_svc = fn; }
+static int peer_is_lazy(const Peer *p) {
+    return g_svc && p->peer && (g_svc(p->peer) & DNSNET_SVC_LAZY);
 }
 unsigned long dnsnet_counter(const char *name) {
 #define X(n) if (!strcmp(name, #n)) return g.c.n;
@@ -1364,6 +1376,12 @@ static int lz_on_dat(Peer *from, const char *name, int ops, int rejected, int pe
              * from a forger is never served as if it were complete. */
             f->ask[i].st = LZA_BAD;
             lz_ask(f, now);
+        } else if (pending == 2) {
+            /* incomplete answer (the host's per-peer verify budget cut the
+             * dump short; PepeNet ECDSA throttle): not a vote either way, no
+             * penalty -- ask another peer; the leftover arrives on retry */
+            f->ask[i].st = LZA_TIMEOUT;
+            lz_ask(f, now);
         } else if (sum->n == 0 && ops == 0) {
             /* holds nothing: NOT a vote that the zone is empty (a lazy peer
              * that never fetched it answers this too). No penalty; ask the
@@ -1557,8 +1575,10 @@ void *dnsnet_up(void *peer, dnsnet_send_fn send) {
             static const char cs[] = "abcdefghijklmnopqrstuvwxyz0123456789";
             p->ae_cursor[0] = cs[rnd64() % (sizeof cs - 1)];
             p->ae_cursor[1] = cs[rnd64() % (sizeof cs - 1)]; p->ae_cursor[2] = '\0';
-            p->ae_left = DNSNET_AE_PAGE;     /* first page of our shelf, on connect */
             p->ae_next = time(NULL) + AE_PERIOD_S / 2 + (time_t)(rnd64() % AE_PERIOD_S);
+            p->lazy_peer = peer_is_lazy(p);
+            if (p->lazy_peer) { g.c.lz_peer_up++; return p; }   /* LZ bit: no AE pages */
+            p->ae_left = DNSNET_AE_PAGE;     /* first page of our shelf, on connect */
             ae_page(p);
             return p;
         }
@@ -1638,7 +1658,8 @@ void dnsnet_tick(void) {
         if (!p->used) continue;
         if (!p->ae_left && (now >= p->ae_next || p->ae_next - now > 2 * AE_PERIOD_S)) {
             p->ae_next = now + AE_PERIOD_S;
-            p->ae_left = DNSNET_AE_PAGE;
+            if (p->lazy_peer) g.c.lz_ae_skip++;     /* LZ bit: this link gets no AE page */
+            else p->ae_left = DNSNET_AE_PAGE;
         }
         if (ring_flush_lanes(p, 0, LANE_HI)) {
             if (p->ae_left) ae_page(p);

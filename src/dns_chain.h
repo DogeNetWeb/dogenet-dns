@@ -12,7 +12,7 @@
 #ifndef DNS_CHAIN_H
 #define DNS_CHAIN_H
 
-#include "dogenet/state.h"
+#include "dns_mesh.h"      /* dogenet/ or pepenet/ mesh headers */
 #include <stdint.h>
 
 typedef struct DnsChain DnsChain;

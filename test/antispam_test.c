@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* antispam_test.c — the local-only anti-spam limits in src/dns_net.c and the
  * dns_state sweep / G1 helpers, on a fake clock (time() and the ms clock are
  * both test-driven, so refills are exact and the run is instant).

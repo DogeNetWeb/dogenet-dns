@@ -68,4 +68,10 @@ unsigned long dnsnet_counter(const char *name);
  * (32 B each, clear op included; empty zone = sha256("")). Returns op count. */
 int dnsnet_zone_digest(const char *name, uint8_t out[32]);
 
+/* LZ service bit (version.services bit 24 = IDX_SVC_DOGENET_LAZY). A lazy
+ * node advertises it; we then send that peer no anti-entropy inventory pages.
+ * fn returns a peer's received services (dnsd: idx_serve_peer_services). */
+#define DNSNET_SVC_LAZY (1LL << 24)
+void dnsnet_set_peer_services(int64_t (*fn)(void *peer));
+
 #endif /* DNS_NET_H */

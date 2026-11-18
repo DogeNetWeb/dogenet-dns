@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* net_test.c — src/dns_net.c, the gossip layer, under an ADVERSARIAL peer.
  *
  * state_dns_test already walks the happy path (one inv → get → dat cycle over

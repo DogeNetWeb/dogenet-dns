@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1   /* mkstemp/getentropy/strdup under -std=c11 (any build) */
+#endif
 /* state_dns_test.c — the DNS overlay over sp_state, in isolation:
  * key/payload codecs, publish→zone→del→clear, the 8 KB budget, digests, the
  * expiry sweep, and a two-node gossip convergence run over an in-memory wire
