@@ -31,6 +31,12 @@ static struct {
     int             kicked;           /* a fetch was queued under the lock: kick after unlock */
 } L = { .mu = PTHREAD_MUTEX_INITIALIZER };
 void dns_lazy_set_kick(void (*fn)(void)) { L.kick = fn; }
+void dns_lazy_poke(void) { if (L.kick) L.kick(); }
+static DnsLazyDigestFn g_dfn; static void *g_du;
+void dns_lazy_set_digest_oracle(DnsLazyDigestFn fn, void *u) { g_dfn = fn; g_du = u; }
+int dns_lazy_committed_digest(const char *name, uint8_t digest[32]) {
+    return g_dfn ? g_dfn(g_du, name, digest) : 0;
+}
 static void unlock_kick(void) {
     int k = L.kicked; L.kicked = 0;
     pthread_mutex_unlock(&L.mu);

@@ -45,6 +45,20 @@ const char *dns_lazy_state_name(int st);
 /* optional: called (any thread, outside the lock) whenever a fetch is queued,
  * so the host can wake its net loop at once (dnsd: idx_serve_wake_fd pipe) */
 void dns_lazy_set_kick(void (*fn)(void));
+/* wake the net loop now (fetch deadlines are checked on its tick); a waiter
+ * that parks a query calls this ~every 100 ms so a timed-out peer is
+ * replaced promptly instead of on the next 1 s idle tick */
+void dns_lazy_poke(void);
+
+/* optional zone-digest COMMITMENT source (A2). fn returns 1 and fills
+ * digest[32] when a committed digest is known for name, else 0. A fetched
+ * zone whose digest (dnsnet_zone_digest: sha256 over its sorted op_ids)
+ * differs is NOT served: the fetch keeps asking other peers, else FAILS.
+ * Today nothing on chain commits a zone digest (footprint draft gap G3), so
+ * the only built-in source is --lazy-digest-file (operator/test pins). */
+typedef int (*DnsLazyDigestFn)(void *u, const char *name, uint8_t digest[32]);
+void dns_lazy_set_digest_oracle(DnsLazyDigestFn fn, void *u);
+int  dns_lazy_committed_digest(const char *name, uint8_t digest[32]);
 
 /* turn lazy mode on for this process (call once, before the threads start) */
 void dns_lazy_init(const DnsLazyConf *c);

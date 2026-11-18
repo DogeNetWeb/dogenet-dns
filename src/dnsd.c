@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <strings.h>
 #include <unistd.h>
 #include <signal.h>
@@ -98,6 +99,25 @@ static void publish_zone_once(void) {
     fprintf(stderr, "dnsd: published %d/%d records for %s\n", ok, g_zone.n, g_apex);
 }
 
+/* A2: --lazy-digest-file "<name> <64 hex>" lines: an operator/test stand-in
+ * for an on-chain zone-digest commitment (none exists today). Re-read per
+ * lookup (one per finished fetch), so edits apply without a restart. */
+static const char *g_digest_file;
+static int digest_file_lookup(void *u, const char *name, uint8_t out[32]) {
+    (void)u;
+    FILE *fp = g_digest_file ? fopen(g_digest_file, "r") : NULL;
+    if (!fp) return 0;
+    char ln[256], nm[80], hx[80]; int found = 0;
+    for (int k = 0; k < 65536 && fgets(ln, sizeof ln, fp); k++) {
+        if (sscanf(ln, "%79s %79s", nm, hx) != 2 || nm[0] == '#' || strcmp(nm, name) || strlen(hx) != 64) continue;
+        int ok = 1;
+        for (int i = 0; i < 32 && ok; i++) { unsigned v; ok = sscanf(hx + 2 * i, "%2x", &v) == 1; out[i] = (uint8_t)v; }
+        found = ok;
+    }
+    fclose(fp);
+    return found;
+}
+
 /* LZ: wake pipe for the serve loop (lazy mode) */
 static int g_wake[2] = { -1, -1 };
 static void lazy_kick(void) { if (g_wake[1] >= 0) { char b = 1; (void)!write(g_wake[1], &b, 1); } }
@@ -128,11 +148,31 @@ static void ctl_dispatch(char *req, char *resp, int rmax) {
         snprintf(resp, rmax,
                  "+OK lazy=%d ready=%d tip=%lld peer_tip=%lld ns_synced=%d peers=%d cached=%d bytes=%lld "
                  "zready=%d loading=%d failed=%d queued=%d hits=%lu misses=%lu stale_served=%lu "
-                 "fetch_ok=%lu fetch_fail=%lu evicted=%lu forged=%lu stale_peer=%lu timeout=%lu\n",
+                 "fetch_ok=%lu fetch_fail=%lu evicted=%lu forged=%lu stale_peer=%lu timeout=%lu "
+                 "empty_peer=%lu digest_bad=%lu rate_wait=%lu digest_pins=%d\n",
                  dns_lazy_enabled(), synced != 0 && peers > 0 && h > 0, (long long)h, (long long)ph, synced, peers,
                  ls.names, (long long)ls.bytes, ls.ready, ls.loading, ls.failed, ls.queued, ls.hits, ls.misses,
                  ls.stale_served, ls.fetch_ok, ls.fetch_fail, ls.evicted,
-                 dnsnet_counter("lz_forged"), dnsnet_counter("lz_stale"), dnsnet_counter("lz_timeout"));
+                 dnsnet_counter("lz_forged"), dnsnet_counter("lz_stale"), dnsnet_counter("lz_timeout"),
+                 dnsnet_counter("lz_empty"), dnsnet_counter("lz_digest_bad"), dnsnet_counter("lz_rate_wait"),
+                 g_digest_file ? 1 : 0);
+        return;
+    }
+    if (!strcasecmp(cmd, "DIGEST")) {                       /* A2: held-zone digest per name */
+        const char *p = req + strlen(cmd); int off = 0;
+        char nm[64];
+        while (sscanf(p, " %63s", nm) == 1 && off < rmax - 200) {
+            p = strstr(p, nm) + strlen(nm);
+            for (char *c = nm; *c; c++) *c = (char)tolower((unsigned char)*c);
+            char *dot = strchr(nm, '.'); if (dot) *dot = 0;
+            if (!sp_name_valid(nm, strlen(nm))) { off += snprintf(resp + off, rmax - off, "%s invalid\n", nm); continue; }
+            uint8_t d[32], w[32]; int n = dnsnet_zone_digest(nm, d);
+            char hx[65], wx[65] = "-";
+            for (int i = 0; i < 32; i++) snprintf(hx + 2 * i, 3, "%02x", d[i]);
+            if (dns_lazy_committed_digest(nm, w)) for (int i = 0; i < 32; i++) snprintf(wx + 2 * i, 3, "%02x", w[i]);
+            off += snprintf(resp + off, rmax - off, "%s ops=%d digest=%s committed=%s\n", nm, n, hx, wx);
+        }
+        if (!off) snprintf(resp, rmax, "-ERR DIGEST <name...>\n");
         return;
     }
     if (!strcasecmp(cmd, "ZONE") || !strcasecmp(cmd, "PREFETCH")) {
@@ -402,7 +442,10 @@ static int usage(const char *p) {
         "  --uplink-mbit <n>  L7 Pi profile: cap dn* gossip peers at n/0.52 [no cap]\n"
         "  --relay-credit-blocks <n>  L2: one relay credit per n blocks per name [10]\n"
         "  --lazy             LAZY mode: sync the namespace only; fetch zones from\n"
-        "                     peers on demand, verify, cache (env DOGENET_LAZY=1)\n"
+        "                     peers on demand, verify, cache (env DOGENET_LAZY=1 or\n"
+        "                     GREATDANE_NODE_LAZY=1)\n"
+        "  --lazy-digest-file <f>  \"<name> <sha256 hex>\" pins: a fetched zone must\n"
+        "                     match (stand-in for an on-chain digest commitment)\n"
         "  --lazy-cache-dir <dir>  lazy cache store = <dir>/lazy-zones.db (if no --store)\n"
         "  --lazy-max-names <n>    cached zones kept, LRU beyond          [2048]\n"
         "  --lazy-max-mb <n>       cached op bytes kept, LRU beyond (MiB) [8]\n"
@@ -467,10 +510,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--lazy-empty-ttl") && i+1 < argc) lc.empty_ttl_s = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lazy-max-stale") && i+1 < argc) lc.max_stale_s = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lazy-wait-ms") && i+1 < argc) lc.wait_ms = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lazy-digest-file") && i+1 < argc) g_digest_file = argv[++i];
         else if (!strcmp(argv[i], "-v")) g_verbose = 1;
         else return usage(argv[0]);
     }
     { const char *e = getenv("DOGENET_LAZY"); if (e && e[0] == '1') lazy = 1; }
+    { const char *e = getenv("GREATDANE_NODE_LAZY"); if (e && e[0] == '1') lazy = 1; }   /* Dane's name */
     static char lazy_store[1024];
     if (lazy && !store && lazy_dir) {
         snprintf(lazy_store, sizeof lazy_store, "%s/lazy-zones.db", lazy_dir);
@@ -479,6 +524,7 @@ int main(int argc, char **argv) {
     if (!db || !store) return usage(argv[0]);
     if (lazy) {
         dns_lazy_init(&lc);
+        if (g_digest_file) dns_lazy_set_digest_oracle(digest_file_lookup, NULL);
         /* wake the serve loop the moment a query queues a fetch (else <= 1 s) */
         if (pipe(g_wake) == 0) {
             fcntl(g_wake[0], F_SETFL, O_NONBLOCK); fcntl(g_wake[1], F_SETFL, O_NONBLOCK);

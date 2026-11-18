@@ -64,4 +64,8 @@ void  dnsnet_set_transport(size_t (*pending)(void *peer), void (*drop)(void *pee
 /* counters by name (tests, status); "blk" = the max-seen tip credit uses */
 unsigned long dnsnet_counter(const char *name);
 
+/* A2: digest of the zone held for name = sha256 over its sorted op_ids
+ * (32 B each, clear op included; empty zone = sha256("")). Returns op count. */
+int dnsnet_zone_digest(const char *name, uint8_t out[32]);
+
 #endif /* DNS_NET_H */

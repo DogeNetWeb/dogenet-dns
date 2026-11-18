@@ -184,7 +184,7 @@ typedef struct {
     int            lowprio, kick, kicked;
     /* LZ: lazy-fetch per-peer score (local only) */
     int            lz_inflight;
-    unsigned       lz_ok, lz_fail, lz_bad, lz_stale;
+    unsigned       lz_ok, lz_fail, lz_bad, lz_stale, lz_empty;
     int64_t        lz_backoff_ms;
 } Peer;
 
@@ -202,7 +202,7 @@ typedef struct {
     X(credit_wait) X(nr_evict) X(nr_evict_young) X(get_hi) X(inv_wait) X(drain_wait) \
     X(zdat_ops) X(l5_skip) X(admit_calls) X(admit_new) X(admit_dup) X(batch) X(batch_fail) \
     X(in_drop) X(useless) X(useful) X(lowprio) X(kick) X(peer_capped) \
-    X(lz_fetch) X(lz_ask) X(lz_ok) X(lz_fail) X(lz_forged) X(lz_stale) X(lz_timeout) X(lz_evict) \
+    X(lz_fetch) X(lz_ask) X(lz_ok) X(lz_fail) X(lz_forged) X(lz_stale) X(lz_empty) X(lz_pull) X(lz_digest_bad) X(lz_rate_wait) X(lz_timeout) X(lz_evict) \
     X(lz_inv_skip) X(lz_dat_skip)
 
 static struct {
@@ -1151,6 +1151,10 @@ static void use_note(Peer *p, int useful) {
 #define LZ_SETTLE_MS     600      /* after the first valid answer, wait this for the rest */
 #endif
 #ifndef LZ_FETCH_MAX_MS
+#define LZ_START_RATE    32       /* new fetches started per second (token bucket) */
+#define LZ_START_BURST   64
+#define LZ_DIGEST_RETRY  2
+#define LZ_EMPTY_MIN     2        /* distinct "hold nothing" answers for a verified-empty zone */        /* digest-mismatch rounds before FAILED */
 #define LZ_FETCH_MAX_MS  8000     /* no valid answer by then: FAILED (retry later) */
 #endif
 
@@ -1159,11 +1163,11 @@ static void lz_sum_add(LzSum *s, const uint8_t id[32]) {
     for (int i = 0; i < 16; i++) s->x[i] ^= id[i];
     s->n++;
 }
-enum { LZA_SENT = 1, LZA_OK, LZA_BAD, LZA_TIMEOUT };
+enum { LZA_SENT = 1, LZA_OK, LZA_BAD, LZA_TIMEOUT, LZA_EMPTY };
 typedef struct {
     char    name[SP_NAME_MAX + 1];
     int64_t start_ms, first_ok_ms;
-    int     nask, ok_n;
+    int     nask, ok_n, empty_n, digest_retry;
     struct { Peer *p; uint32_t gen; int64_t sent_ms; int st; LzSum sum; } ask[LZ_ASK_MAX];
 } LzFetch;
 static LzFetch g_lz[LZ_SLOTS];
@@ -1198,7 +1202,10 @@ static Peer *lz_pick(const LzFetch *f, int64_t now) {
         Peer *p = &g.peers[i];
         if (!p->used || lz_asked(f, p) || p->lz_inflight >= LZ_PER_PEER) continue;
         if (!out_room(p, 24 + 1 + SP_NAME_MAX)) continue;
+        /* swarm: a peer that served real zones before is preferred; one that
+         * often holds nothing (another lazy node) sinks, but is still asked */
         int64_t sc = (int64_t)p->lz_bad * 64 + (int64_t)p->lz_fail * 8 + (int64_t)p->lz_stale * 2
+                   + (int64_t)(p->lz_empty > 15 ? 15 : p->lz_empty) - (int64_t)(p->lz_ok > 8 ? 8 : p->lz_ok) + 8
                    + (p->lz_backoff_ms > now ? 1000000 : 0) + (p->lowprio ? 4096 : 0)
                    + (int64_t)p->lz_inflight;
         sc = sc * 16 + (int64_t)(rnd64() & 15);            /* random tie-break */
@@ -1267,6 +1274,54 @@ static void lz_finish(LzFetch *f, int ok, int64_t now) {
     f->name[0] = '\0';
     lz_evict();
 }
+/* A2: zone digest = sha256(sorted op_ids of the held zone, clear op incl.) */
+typedef struct { uint8_t (*id)[32]; int n, cap; } LzIds;
+static int lz_ids_cb(void *u, const uint8_t *key, int klen, int op, uint32_t anchor, const uint8_t *blob, int blen) {
+    (void)key; (void)klen; (void)op; (void)anchor;
+    LzIds *v = u; SpStateOp p;
+    if (!sp_state_op_parse(blob, blen, &p)) return 1;
+    if (v->n == v->cap) {
+        int nc = v->cap ? v->cap * 2 : 32;
+        void *t = realloc(v->id, (size_t)nc * 32); if (!t) return 0;
+        v->id = t; v->cap = nc;
+    }
+    memcpy(v->id[v->n++], p.op_id, 32);
+    return 1;
+}
+static int lz_id_cmp(const void *a, const void *b) { return memcmp(a, b, 32); }
+int dnsnet_zone_digest(const char *name, uint8_t out[32]) {
+    LzIds v = { 0 };
+    uint8_t *cb; int cl;
+    if (g.st && sp_state_clear_get(g.st, name, &cb, &cl)) { lz_ids_cb(&v, NULL, 0, 0, 0, cb, cl); free(cb); }
+    if (g.st) sp_state_iter(g.st, name, lz_ids_cb, &v);
+    if (v.n > 1) qsort(v.id, (size_t)v.n, 32, lz_id_cmp);
+    sp_sha256(v.n ? (const uint8_t *)v.id : (const uint8_t *)"", (size_t)v.n * 32, out);
+    free(v.id);
+    return v.n;
+}
+/* 1 = no commitment known, or the held zone matches it */
+static int lz_digest_final(LzFetch *f) {
+    uint8_t want[32], have[32];
+    if (!dns_lazy_committed_digest(f->name, want)) return 1;
+    dnsnet_zone_digest(f->name, have);
+    if (!memcmp(want, have, 32)) return 1;
+    g.c.lz_digest_bad++;
+    return 0;
+}
+/* quorum reached: with a commitment, a mismatch means every answer so far was
+ * stale/withheld — penalize them and keep asking others (bounded) */
+static int lz_digest_gate(LzFetch *f, int64_t now) {
+    if (lz_digest_final(f)) return 1;
+    for (int i = 0; i < f->nask; i++) if (f->ask[i].st == LZA_OK) {
+        Peer *p = f->ask[i].p;
+        f->ask[i].st = LZA_BAD;
+        if (p->used && p->gen == f->ask[i].gen) { p->lz_stale++; g.c.lz_stale++; lz_backoff(p, 10000, 1, 10000, now); }
+    }
+    f->ok_n = 0; f->first_ok_ms = 0;
+    if (++f->digest_retry > LZ_DIGEST_RETRY || !lz_ask(f, now)) { lz_finish(f, 0, now); return 0; }
+    return 0;
+}
+
 /* end the fetch when it has what it needs (also called on each answer) */
 static void lz_check(LzFetch *f, int64_t now) {
     int out = lz_outstanding(f);
@@ -1277,11 +1332,15 @@ static void lz_check(LzFetch *f, int64_t now) {
         (f->ok_n >= 1 && out == 0 && !more) ||
         (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS && out == 0) ||
         (f->ok_n >= 1 && now - f->first_ok_ms >= LZ_SETTLE_MS + LZ_ASK_TIMEOUT_MS)) {
-        lz_finish(f, 1, now);
+        if (lz_digest_gate(f, now)) lz_finish(f, 1, now);
     } else if (now - f->start_ms >= LZ_FETCH_MAX_MS) {
-        lz_finish(f, f->ok_n > 0, now);
+        int ok = f->ok_n > 0 || f->empty_n >= LZ_EMPTY_MIN;
+        if (ok && !lz_digest_final(f)) ok = 0;
+        lz_finish(f, ok, now);
     } else if (f->ok_n == 0 && out == 0 && f->nask > 0 && !more) {
-        lz_finish(f, 0, now);                            /* everyone tried, nothing valid */
+        /* everyone tried: all said "nothing" = verified-empty (if a digest is
+         * committed it must match the empty set); else nothing valid = FAILED */
+        lz_finish(f, f->empty_n >= LZ_EMPTY_MIN && lz_digest_final(f), now);
     }
 }
 /* an answer for a name we track arrived; 1 = it answers one of our fetch asks */
@@ -1305,9 +1364,15 @@ static int lz_on_dat(Peer *from, const char *name, int ops, int rejected, int pe
              * from a forger is never served as if it were complete. */
             f->ask[i].st = LZA_BAD;
             lz_ask(f, now);
+        } else if (sum->n == 0 && ops == 0) {
+            /* holds nothing: NOT a vote that the zone is empty (a lazy peer
+             * that never fetched it answers this too). No penalty; ask the
+             * next. Verified-empty only when every candidate said so. */
+            f->ask[i].st = LZA_EMPTY; f->empty_n++; from->lz_empty++; g.c.lz_empty++;
+            lz_ask(f, now);
         } else {
             f->ask[i].st = LZA_OK; f->ask[i].sum = *sum;
-            f->ok_n++;
+            f->ok_n++; if (from->lz_empty) from->lz_empty--;
             if (!f->first_ok_ms) f->first_ok_ms = now;
         }
         lz_check(f, now);                                    /* quorum: done now, not next tick */
@@ -1328,7 +1393,11 @@ static void lz_peer_down(Peer *p) {
 static void lz_service(int64_t now) {
     /* start queued fetches */
     char nm[64];
+    static double tok = LZ_START_BURST; static int64_t tok_ms;
+    if (tok_ms) { tok += (double)(now - tok_ms) * LZ_START_RATE / 1000.0; if (tok > LZ_START_BURST) tok = LZ_START_BURST; }
+    tok_ms = now;
     for (int budget = 64; budget > 0; budget--) {
+        if (tok < 1.0) { DnsLazyStats ls_; dns_lazy_stats(&ls_); if (ls_.queued > 0) g.c.lz_rate_wait++; break; }   /* flood: stays LOADING */
         LzFetch *fr = NULL;
         for (int i = 0; i < LZ_SLOTS && !fr; i++) if (!g_lz[i].name[0]) fr = &g_lz[i];
         if (!fr) break;
@@ -1337,7 +1406,7 @@ static void lz_service(int64_t now) {
         memset(fr, 0, sizeof *fr);
         snprintf(fr->name, sizeof fr->name, "%s", nm);
         fr->start_ms = now;
-        dns_lazy_begin(nm); g.c.lz_fetch++;
+        dns_lazy_begin(nm); g.c.lz_fetch++; tok -= 1.0;
         for (int k = 0; k < LZ_FANOUT; k++) if (!lz_ask(fr, now)) break;
     }
     /* drive fetches in flight */
@@ -1387,6 +1456,16 @@ static void on_zget(Peer *from, const uint8_t *pay, int n) {
     char name[SP_NAME_MAX + 1];
     memcpy(name, pay + 1, (size_t)nlen); name[nlen] = '\0';
     if (!sp_name_valid(name, (size_t)nlen)) return;
+    /* A1 swarm, pull-through: a lazy node asked for an OWNED zone it does not
+     * hold answers (empty, as any node does) and fetches it itself, so the
+     * asker's retry -- and every later asker -- finds a verified copy here.
+     * Bounded by the LZ_START_RATE bucket, the LRU caps and the L-series
+     * per-peer get rate below. Local only; no wire change. */
+    if (g.lazy && !dns_lazy_tracked(name)) {
+        uint8_t ow[20];
+        if (g.o.owner_now && g.o.owner_now(g.o.u, name, ow) && dns_lazy_prefetch(name))
+            g.c.lz_pull++;
+    }
     refill(&from->get_tok, &from->get_ms, DNSNET_GET_BURST, DNSNET_GET_RATE, 1000, now_ms());
     if (from->sq_n == 0 && from->sqh_n == 0 && from->get_tok >= 1 && send_zdat(from, name)) { from->get_tok--; return; }
     if (sq_push(from, name)) g.c.get_queued++; else g.c.get_shed++;

@@ -198,6 +198,7 @@ static void serve_udp(DnsdCore *dc) {
 /* LZ: re-try parked UDP queries; answer when ready or at the deadline */
 static int park_service(DnsdCore *dc, int64_t now) {
     int left = 0;
+
     for (int i = 0; i < DNSD_PARK_MAX; i++) {
         DnsdPark *k = &dc->park[i];
         if (!k->used) continue;
@@ -412,7 +413,10 @@ int dnsd_core_poll(DnsdCore *dc, int timeout_ms) {
         }
     }
     if (parked) {                                        /* LZ: ready yet? deadline? */
-        park_service(dc, core_ms());
+        static int64_t poked;                            /* keep the net tick brisk (fetch */
+        int64_t pn = core_ms();                          /* timeouts are checked there)   */
+        if (pn - poked >= 100) { dns_lazy_poke(); poked = pn; }
+        park_service(dc, pn);
         for (int i = 0; i < DNSD_TCP_MAX; i++) {
             DnsdTcpConn *t = &dc->tcp[i];
             if (t->used && t->park_ms && !t->out && tcp_answer(dc, t) != 0) tcp_close(t);

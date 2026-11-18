@@ -1,0 +1,255 @@
+diff -ru -x .git a/src/gd_node.c b/src/gd_node.c
+--- a/src/gd_node.c	2026-11-18 16:26:59.967741739 -0600
++++ b/src/gd_node.c	2026-11-18 16:27:54.277053181 -0600
+@@ -9,6 +9,8 @@
+ #include "wallet.h"
+ #include "platform.h"
+ #include "indexer.h"        /* idx_serve_listen_status: local status only */
++#include "dns_lazy.h"       /* lazy node (namespace-only sync, zones on demand) */
++#include <fcntl.h>
+ 
+ #include <errno.h>
+ #include <signal.h>
+@@ -139,6 +141,9 @@
+     dst[o] = 0;
+ }
+ 
++static int g_lazy_wake_w = -1;
++static void lazy_kick(void) { if (g_lazy_wake_w >= 0) { char b = 1; (void)!write(g_lazy_wake_w, &b, 1); } }
++
+ /* One status line (no trailing newline). Field set is append-only: older
+  * readers ignore the new keys. */
+ static void build_status(char *out, size_t cap, const char *coin, const char *dir) {
+@@ -165,6 +170,11 @@
+                       : ph <= 0 ? "connecting"
+                       : es.height + 2 < ph ? "syncing" : "ready";
+     char dd[600]; json_safe(dd, sizeof dd, dir);
++    /* lazy: namespace_synced = the ownership fold is at the peer tip, so every
++     * owned name answers (READY or "loading"), never a false "unowned" */
++    int ns_synced = es.height > 0 && ph > 0 && es.height + 2 >= ph;
++    DnsLazyStats lz; memset(&lz, 0, sizeof lz);
++    if (dns_lazy_enabled()) dns_lazy_stats(&lz);
+     snprintf(out, cap,
+         "{\"event\":\"status\",\"coin\":\"%s\",\"height\":%lld,"
+         "\"peer_height\":%lld,\"activation\":%lld,\"engine\":%d,"
+@@ -173,24 +183,32 @@
+         "\"dane_fail\":%lld,\"listen\":\"%s\",\"listen_port\":%d,"
+         "\"listen_errno\":%d,\"listen_error\":\"%s\","
+         "\"state\":\"%s\",\"sync_pct\":%.1f,\"peers_in\":%d,\"peers_out\":%d,"
+-        "\"data_dir\":\"%s\"}",
++        "\"data_dir\":\"%s\",\"lazy\":%d,\"namespace_synced\":%s,"
++        "\"zones_cached\":%d,\"zones_loading\":%d,\"zones_failed\":%d}",
+         coin, (long long)es.height, (long long)es.peer_height,
+         (long long)es.activation, es.running, es.pass_active,
+         (long long)es.passes, ptotal, pmesh, (long long)ws.conns,
+         (long long)ws.dane_ok, (long long)ws.dane_fail,
+-        lname, lport, lerr, lmsg, state, pct, pin, pout, dd);
++        lname, lport, lerr, lmsg, state, pct, pin, pout, dd,
++        dns_lazy_enabled(), ns_synced ? "true" : "false", lz.names, lz.loading, lz.failed);
+ }
+ 
+ int main(int argc, char **argv) {
+     const char *data = NULL, *only = NULL, *seeds = NULL;
+     const char *snap_dir = NULL, *snap_pin = NULL;   /* idx-04 */
+-    int ephemeral = 0, stdio_ctl = 0, dane_api = 0, listen_port = -1;
++    int ephemeral = 0, stdio_ctl = 0, dane_api = 0, listen_port = -1, lazy = 0;
++    DnsLazyConf lc; dns_lazy_conf_default(&lc);
+     for (int i = 1; i < argc; i++) {
+         if (!strcmp(argv[i], "--data") && i + 1 < argc) data = argv[++i];
+         else if (!strcmp(argv[i], "--only") && i + 1 < argc) only = argv[++i];
+         else if (!strcmp(argv[i], "--ephemeral-ports")) ephemeral = 1;
+         else if (!strcmp(argv[i], "--dane-api")) dane_api = 1;
+         else if (!strcmp(argv[i], "--stdio")) stdio_ctl = 1;
++        else if (!strcmp(argv[i], "--lazy")) lazy = 1;
++        else if (!strcmp(argv[i], "--lazy-max-names") && i + 1 < argc) lc.max_names = atoi(argv[++i]);
++        else if (!strcmp(argv[i], "--lazy-max-mb") && i + 1 < argc) lc.max_bytes = (int64_t)atoi(argv[++i]) << 20;
++        else if (!strcmp(argv[i], "--lazy-ttl") && i + 1 < argc) lc.ttl_s = atoi(argv[++i]);
++        else if (!strcmp(argv[i], "--lazy-wait-ms") && i + 1 < argc) lc.wait_ms = atoi(argv[++i]);
+         else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) seeds = argv[++i];
+         else if (!strcmp(argv[i], "--no-listen")) listen_port = 0;
+         else if (!strcmp(argv[i], "--snapshot") && i + 1 < argc) snap_dir = argv[++i];
+@@ -205,10 +223,28 @@
+         }
+         else {
+             fprintf(stderr, "usage: greatdane-node --data <dir> --only pep|doge [--ephemeral-ports] [--dane-api] [--stdio] [--seeds host[:port],...]\n"
+-                            "       [--listen-port N | --no-listen] [--snapshot <dir> [--snapshot-sha256 <hex>]]\n");
++                            "       [--listen-port N | --no-listen] [--snapshot <dir> [--snapshot-sha256 <hex>]]\n"
++                            "       [--lazy (or env GREATDANE_NODE_LAZY=1) [--lazy-max-names N] [--lazy-max-mb N]\n"
++                            "        [--lazy-ttl S] [--lazy-wait-ms MS]]\n");
+             return 2;
+         }
+     }
++    { const char *e = getenv("GREATDANE_NODE_LAZY"); if (e && e[0] == '1') lazy = 1; }
++    if (lazy) {
++        /* namespace-only sync; zones fetched on demand and verified. Must run
++         * before dnsnet_start_inst (dnsnet adopts the cache store at init).
++         * The zone cache is the node's normal store under --data. */
++        dns_lazy_init(&lc);
++        /* wake the serve loop the moment a lookup queues a fetch (else <= 1 s) */
++        static int wk[2] = { -1, -1 };
++        if (pipe(wk) == 0) {
++            fcntl(wk[0], F_SETFL, O_NONBLOCK); fcntl(wk[1], F_SETFL, O_NONBLOCK);
++            g_lazy_wake_w = wk[1]; idx_serve_wake_fd = wk[0];
++            dns_lazy_set_kick(lazy_kick);
++        }
++        fprintf(stderr, "greatdane-node: LAZY mode max_names=%d ttl=%ds wait=%dms\n",
++                dns_lazy_conf()->max_names, dns_lazy_conf()->ttl_s, dns_lazy_conf()->wait_ms);
++    }
+     if (!data || !data[0]) {
+         fprintf(stderr, "greatdane-node: --data is required (this process never uses ~/.pepenet)\n");
+         return 2;
+diff -ru -x .git a/src/webproxy.c b/src/webproxy.c
+--- a/src/webproxy.c	2026-11-18 16:26:59.967741739 -0600
++++ b/src/webproxy.c	2026-11-18 16:27:39.516696753 -0600
+@@ -375,12 +375,27 @@
+ // ---- GreatDANE M3 (opt-in, --dane-api): the browser verifies DANE itself. ---
+ // The node never terminates TLS in this mode: CONNECT splices raw TCP to the
+ // chain A record, and GET /gd/tlsa?host= hands the browser the on-chain TLSA.
++/* lazy node: how long /gd/tlsa and a passthrough CONNECT wait for a cold
++ * zone before answering "loading" (GREATDANE_NODE_LAZY_WAIT_MS, 0..9000,
++ * default 3000 -- well inside Dane's 10 s budget). */
++static int gd_lazy_wait_ms(void) {
++    static int v = -1;
++    if (v < 0) {
++        const char *e = getenv("GREATDANE_NODE_LAZY_WAIT_MS");
++        int x = e && *e ? atoi(e) : 3000;
++        v = x < 0 ? 0 : x > 9000 ? 9000 : x;
++    }
++    return v;
++}
++
+ static const char *res_name(int rc) {
+     switch (rc) {
+     case RES_OK: return "ok";
+     case RES_UNOWNED: return "unowned";
+     case RES_NO_TLSA: return "no_tlsa";
+     case RES_BAD_RECORD: return "bad_record";
++    case RES_LOADING:
++    case RES_FETCH_FAILED: return "loading";     /* lazy node: owned, zone not here yet */
+     default: return "bad_name";
+     }
+ }
+@@ -420,10 +435,14 @@
+     } else {
+         OriginInfo oi;
+         memset(&oi, 0, sizeof oi);
+-        int rc = resolver_lookup(host, &oi, g->rv);
++        int rc = resolver_lookup_wait(host, &oi, g->rv, gd_lazy_wait_ms());
+         bn = snprintf(body, sizeof body,
+                       "{\"host\":\"%s\",\"status\":\"%s\",\"height\":%lld,\"peer_height\":%lld",
+                       host, res_name(rc), (long long)h, (long long)ph);
++        if (rc == RES_LOADING || rc == RES_FETCH_FAILED)      /* same codes dnsd puts on the wire */
++            bn += snprintf(body + bn, sizeof body - bn,
++                           ",\"rcode\":\"SERVFAIL\",\"ede\":%d,\"phase\":\"%s\",\"retry_ms\":1000",
++                           rc == RES_LOADING ? 14 : 22, rc == RES_LOADING ? "fetching" : "fetch_failed");
+         if (rc == RES_OK) {
+             char hex[129];
+             for (size_t i = 0; i < oi.assoc_len && i < 64; i++)
+@@ -727,7 +746,14 @@
+         if (g->passthrough) {               // M3: raw TCP to the chain origin
+             OriginInfo oi;
+             memset(&oi, 0, sizeof oi);
+-            int rc = g->rv ? resolver_lookup(target, &oi, g->rv) : RES_BAD_NAME;
++            int rc = g->rv ? resolver_lookup_wait(target, &oi, g->rv, gd_lazy_wait_ms()) : RES_BAD_NAME;
++            if (rc == RES_LOADING || rc == RES_FETCH_FAILED) {   /* lazy: retryable, not a 404 */
++                static const char ld[] = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n"
++                                         "X-GreatDANE-Status: loading\r\nContent-Length: 0\r\n"
++                                         "Connection: close\r\n\r\n";
++                fd_write_all(cfd, ld, sizeof ld - 1);
++                return;
++            }
+             if (rc != RES_OK) { http_status(cfd, "404 Not Found"); return; }
+             ofd = dial_origin(oi.host, oi.port);
+         } else {
+diff -ru -x .git a/tls/src/resolve.c b/tls/src/resolve.c
+--- a/tls/src/resolve.c	2026-11-18 16:27:00.363751302 -0600
++++ b/tls/src/resolve.c	2026-11-18 16:28:33.558001725 -0600
+@@ -4,12 +4,14 @@
+ 
+ #include "dns_state.h"   /* SpState + dns_state_zone (the live zone) */
+ #include "dns_chain.h"   /* the lease-gated ownership oracle */
++#include "dns_lazy.h"    /* lazy node: per-name zone state (thread-safe) */
+ 
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <stdio.h>
+ #include <pthread.h>
++#include <time.h>
+ 
+ struct Resolver {
+     char   suffix[16];
+@@ -111,9 +113,30 @@
+     return ok;
+ }
+ 
+-int resolver_lookup(const char *sni, OriginInfo *out, void *ud) {
++/* lazy gate: owned apex whose zone is not READY -> LOADING / FETCH_FAILED.
++ * recheck=1 does not count a new miss (a waiting request polling). */
++static int lazy_gate(Resolver *r, const char *sni, int recheck) {
++    if (!dns_lazy_enabled()) return RES_OK;
++    char apex[64], sub[128];
++    if (!origin_split(sni, r->suffix, apex, sizeof apex, sub, sizeof sub)) return RES_OK;
++    for (char *c = apex; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 'a' - 'A';
++    pthread_mutex_lock(&r->mu);
++    uint8_t owner[20], held[20];
++    int owned = r->orc.owner_now(r->orc.u, apex, owner);
++    int stale_owner = owned && sp_state_owner(r->st, apex, held) && memcmp(held, owner, 20) != 0;
++    pthread_mutex_unlock(&r->mu);
++    if (!owned) return RES_OK;                      /* resolver_lookup says UNOWNED */
++    if (stale_owner) dns_lazy_invalidate(apex);     /* rows of a previous owner: refetch */
++    int s = recheck ? dns_lazy_want_recheck(apex, NULL) : dns_lazy_want(apex, NULL);
++    if (s == DNS_LAZY_READY) return RES_OK;
++    return s == DNS_LAZY_FAILED ? RES_FETCH_FAILED : RES_LOADING;
++}
++
++static int lookup_impl(const char *sni, OriginInfo *out, void *ud, int recheck) {
+     Resolver *r = ud;
+     if (!r || !sni || !out) return RES_BAD_NAME;
++    int lz = lazy_gate(r, sni, recheck);
++    if (lz != RES_OK) return lz;
+     if (resolver_resolve(sni, out, ud)) return RES_OK;
+     char apex[64], sub[128];
+     if (!origin_split(sni, r->suffix, apex, sizeof apex, sub, sizeof sub))
+@@ -134,3 +157,21 @@
+     pthread_mutex_unlock(&r->mu);
+     return has ? RES_BAD_RECORD : RES_NO_TLSA;
+ }
++
++int resolver_lookup(const char *sni, OriginInfo *out, void *ud) {
++    return lookup_impl(sni, out, ud, 0);
++}
++
++int resolver_lookup_wait(const char *sni, OriginInfo *out, void *ud, int wait_ms) {
++    int rc = lookup_impl(sni, out, ud, 0);
++    struct timespec t0, t, d = { 0, 25 * 1000000L };
++    clock_gettime(CLOCK_MONOTONIC, &t0);
++    while (rc == RES_LOADING && wait_ms > 0) {
++        clock_gettime(CLOCK_MONOTONIC, &t);
++        if ((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000 >= wait_ms) break;
++        nanosleep(&d, NULL);
++        dns_lazy_poke();                 /* net tick checks fetch timeouts: keep it brisk */
++        rc = lookup_impl(sni, out, ud, 1);
++    }
++    return rc;
++}
+diff -ru -x .git a/tls/src/resolve.h b/tls/src/resolve.h
+--- a/tls/src/resolve.h	2026-11-18 16:27:00.363751302 -0600
++++ b/tls/src/resolve.h	2026-11-18 16:27:17.160156895 -0600
+@@ -31,7 +31,15 @@
+ /* GreatDANE (additive): resolver_resolve plus WHY it refused. Same gate,
+  * same answer on RES_OK (fills *out); never relaxes resolver_resolve. */
+ enum { RES_OK = 0, RES_BAD_NAME = 1, RES_UNOWNED = 2, RES_NO_TLSA = 3,
+-       RES_BAD_RECORD = 4 };
++       RES_BAD_RECORD = 4,
++       /* lazy node (dns_lazy enabled): the name IS owned but its zone is not
++        * fetched/verified yet. Never reported as UNOWNED/NO_TLSA/BAD_RECORD. */
++       RES_LOADING = 5,        /* fetch in flight            (dnsd: SERVFAIL + EDE 14) */
++       RES_FETCH_FAILED = 6 }; /* no verified answer, retrying (dnsd: SERVFAIL + EDE 22) */
+ int resolver_lookup(const char *sni, OriginInfo *out, void *ud);
+ 
++/* resolver_lookup, but while the result is RES_LOADING re-check every 25 ms
++ * for up to wait_ms (lazy mode only; full mode = resolver_lookup). */
++int resolver_lookup_wait(const char *sni, OriginInfo *out, void *ud, int wait_ms);
++
+ #endif
