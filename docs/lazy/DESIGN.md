@@ -1,4 +1,4 @@
-# DogeNet lazy node: DESIGN (keeper/lazy-node, non-main branch)
+# DogeNet lazy node: DESIGN (keeper/lazy-node, approved for main Nov 19, 2026)
 
 Status: built and tested on the keeper/lazy-node branch only (a non-main branch; nowon asked on Nov 18 for all
 branches to be mirrored to GitHub as non-main branches). Not merged to main, not deployed, no seed touched.
@@ -322,13 +322,12 @@ Rejected: it changes on-chain formats and puts data on chain. nowon: "Definitely
 
 **Next step if approved:** Option 2 only. Known limit stays: a peer withholding both the new head and the new ops still wins against a lazy node that asks only that peer, so lazy fetch keeps asking 2+ peers.
 
-## 11. Lazy service bit (BUILT on the keeper/lazy-node branch only, 230efff — PROTOCOL CHANGE, not approved to ship)
+## 11. Lazy service bit (BUILT — approved for main, nowon Nov 19, 2026; shipping to seeds is a separate step)
 
-**Approval status.** nowon approved BUILDING the lazy service bit on a non-main branch only
-(his words, relayed by ITFH: "Yes, add the lazy service bit"). That is not approval to ship it:
-deploying it to any seed or node, merging it to main, or shipping it in a release is still a
-PROTOCOL CHANGE that needs nowon's explicit sign-off. (Mirroring the branch to GitHub as a
-non-main branch, per nowon's Nov 18 request, is not shipping.)
+**Approval status.** nowon approved bringing the lazy node work, including the lazy service
+bit, onto main (Nov 19: "Let's bring the lazy node stuff in too."). Merging it to main is
+approved. Deploying it to the seeds, or shipping it as a default in a release, is still a
+separate step and needs its own sign-off.
 
 **Wire.** The existing Bitcoin-lineage `version` message, field `services`
 (uint64 LE, payload bytes 4..11). A lazy node ORs in **bit 24 = 0x0000000001000000**
