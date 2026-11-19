@@ -321,7 +321,12 @@ Rejected: it changes on-chain formats and puts data on chain. nowon: "Definitely
 
 **Next step if approved:** Option 2 only. Known limit stays: a peer withholding both the new head and the new ops still wins against a lazy node that asks only that peer, so lazy fetch keeps asking 2+ peers.
 
-## 11. Lazy service bit (BUILT — approved PROTOCOL CHANGE, branch 230efff)
+## 11. Lazy service bit (BUILT on the private branch only, 230efff — PROTOCOL CHANGE, not approved to ship)
+
+**Approval status.** nowon approved BUILDING the lazy service bit on the private branch only
+(his words, relayed by ITFH: "Yes, add the lazy service bit"). That is not approval to ship it:
+deploying it to any seed or node, merging it to main, or shipping it in a release is still a
+PROTOCOL CHANGE that needs nowon's explicit sign-off.
 
 **Wire.** The existing Bitcoin-lineage `version` message, field `services`
 (uint64 LE, payload bytes 4..11). A lazy node ORs in **bit 24 = 0x0000000001000000**
