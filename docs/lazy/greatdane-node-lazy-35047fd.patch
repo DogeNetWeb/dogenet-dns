@@ -2019,10 +2019,23 @@ index bb60f1b..af78bce 100644
   * sp_state record key it feeds (dns_key_pack/unpack in src/dns_state.c).
   *
 diff --git a/indexer/src/db.c b/indexer/src/db.c
-index 1c2289c..f4b0c32 100644
+index 1c2289c..81882dd 100644
 --- a/indexer/src/db.c
 +++ b/indexer/src/db.c
-@@ -942,36 +942,60 @@ int idx_db_ckpt_seed(sqlite3 *db, SmState *s) {
+@@ -97,6 +97,12 @@ void idx_db_raise_peer_height(sqlite3 *db, int64_t h) {
+ void idx_db_set_peer_height(sqlite3 *db, int64_t h) {
+     idx_db_raise_peer_height(db, h);
+ }
++// The ONE non-monotonic writer: idx_peer_height_load() healing a legacy
++// unchecked claim (stored > validated tip + 2) down to the validated tip.
++void idx_db_heal_peer_height(sqlite3 *db, int64_t h) {
++    char b[32]; snprintf(b, sizeof b, "%lld", (long long)(h > 0 ? h : 0));
++    meta_set(db, "peer_height", b);
++}
+ int64_t idx_db_get_peer_height(sqlite3 *db) {
+     char b[32]; return meta_get(db, "peer_height", b, sizeof b) ? strtoll(b, NULL, 10) : 0;
+ }
+@@ -942,36 +948,60 @@ int idx_db_ckpt_seed(sqlite3 *db, SmState *s) {
      return -1;
  }
  
@@ -2089,7 +2102,7 @@ index 1c2289c..f4b0c32 100644
      sqlite3_finalize(st); return found;
  }
  int idx_db_name_row(sqlite3 *db, const char *name, IdxNameRow *out) {
-@@ -980,11 +1004,11 @@ int idx_db_name_row(sqlite3 *db, const char *name, IdxNameRow *out) {
+@@ -980,11 +1010,11 @@ int idx_db_name_row(sqlite3 *db, const char *name, IdxNameRow *out) {
      sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
      if (sqlite3_step(st) == SQLITE_ROW) {
          memset(out, 0, sizeof *out);
@@ -2104,6 +2117,18 @@ index 1c2289c..f4b0c32 100644
          out->burn_leg = (uint64_t)sqlite3_column_int64(st, 9); out->pay_leg = (uint64_t)sqlite3_column_int64(st, 10);
          out->reserve_expiry = sqlite3_column_int64(st, 11); found = 1;
      }
+diff --git a/indexer/src/db.h b/indexer/src/db.h
+index 3ef5f1c..b1d9309 100644
+--- a/indexer/src/db.h
++++ b/indexer/src/db.h
+@@ -26,6 +26,7 @@ int  idx_db_load_sync(sqlite3 *db, int64_t *height, uint8_t tip_hash[32]);   //
+ void    idx_db_set_peer_height(sqlite3 *db, int64_t h);   // monotonic max (same as raise)
+ void    idx_db_raise_peer_height(sqlite3 *db, int64_t h);   // monotonic max
+ int64_t idx_db_get_peer_height(sqlite3 *db);
++void    idx_db_heal_peer_height(sqlite3 *db, int64_t h);  // load-time heal only (lowers)
+ void idx_db_set_activation(sqlite3 *db, int64_t activation);
+ int64_t idx_db_get_activation(sqlite3 *db, int64_t dflt);
+ void    idx_db_set_subsidy(sqlite3 *db, int64_t subsidy_koinu);
 diff --git a/indexer/src/indexer.h b/indexer/src/indexer.h
 index a1fd701..c77a92f 100644
 --- a/indexer/src/indexer.h
@@ -2127,10 +2152,76 @@ index a1fd701..c77a92f 100644
  /* Overlay / serve local-policy strike: add `n` to this SConn's score; at 100
   * ban the IPv4 24 h and drop the conn. `peer` is the SConn* from peer_up. */
 diff --git a/indexer/src/sync.c b/indexer/src/sync.c
-index 2386b4f..bbe991c 100644
+index 2386b4f..3ddd1c1 100644
 --- a/indexer/src/sync.c
 +++ b/indexer/src/sync.c
-@@ -2142,6 +2142,9 @@ void idx_serve_peer_kick(void *peer, const char *why) {
+@@ -1050,9 +1050,26 @@ static int64_t g_ph_best = 0, g_ph_disk = 0, g_ph_at = 0;
+ // Seed in-memory high-water from the DB so a post-restart note/handshake cannot
+ // transiently set g_ph_disk below the stored value (raise alone keeps the DB safe;
+ // load keeps the rate-limit cursor honest).
++// best_known / meta peer_height hold VALIDATED evidence only: our own connected
++// blocks and serve-plane announcements of blocks already on our chain (+1 for a
++// block whose parent is). Older builds persisted the raw handshake start_height;
++// a stored value above our validated tip + 2 is such a legacy claim and is
++// healed down to the tip on load.
+ void idx_peer_height_load(sqlite3 *db) {
+     int64_t h = db ? idx_db_get_peer_height(db) : 0;
+     if (h <= 0) return;
++    { int64_t vh = 0; uint8_t vt[32];
++      if (idx_db_load_sync(db, &vh, vt) && h > vh + 2) {
++          fprintf(stderr, "peer_height: stored %lld is above the validated tip %lld (unchecked legacy claim) — healed\n",
++                  (long long)h, (long long)vh);
++          idx_db_heal_peer_height(db, vh);
++          h = vh;
++          pthread_mutex_lock(&g_ph_mu);
++          if (g_ph_best > h) g_ph_best = h;
++          if (g_ph_disk > h) g_ph_disk = h;
++          pthread_mutex_unlock(&g_ph_mu);
++          if (h <= 0) return;
++      } }
+     pthread_mutex_lock(&g_ph_mu);
+     if (h > g_ph_best) g_ph_best = h;
+     if (h > g_ph_disk) g_ph_disk = h;
+@@ -1632,10 +1649,10 @@ static int cmd_sync(int argc, char **argv) {
+             fprintf(stderr, "  %s:%u handshake failed\n", host, port);
+             close(fd); fd = -1; continue;
+         }
+-        if (idx_sync_peer_height > 0) {   // a handshake claim, never below announced evidence
+-            int64_t ev = idx_peer_height_note(NULL, 0, 0, 0);
+-            idx_db_raise_peer_height(db, idx_sync_peer_height > ev ? idx_sync_peer_height : ev);  // db-monotonic
+-        }
++        // The handshake start_height is an unchecked claim: it stays this pass's
++        // live value (idx_sync_peer_height, dropped when the pass's connection
++        // closes) and is NEVER persisted or folded into best_known — one hostile
++        // peer advertising ~2^31 would otherwise pin namespace_synced false forever.
+         net_peer_str(fd, picked, sizeof picked);
+         idx_db_peer_seen(db, picked, (int64_t)idx_sync_peer_services,
+                          (const char *)idx_sync_peer_agent, (int64_t)time(NULL));
+@@ -1667,10 +1684,10 @@ static int cmd_sync(int argc, char **argv) {
+         snprintf(picked, sizeof picked, "%s", fb_picked);
+         idx_sync_peer_height = fb_h; idx_sync_peer_services = (uint64_t)fb_svc;
+         snprintf((char *)idx_sync_peer_agent, sizeof idx_sync_peer_agent, "%s", fb_agent);
+-        if (idx_sync_peer_height > 0) {   // a handshake claim, never below announced evidence
+-            int64_t ev = idx_peer_height_note(NULL, 0, 0, 0);
+-            idx_db_raise_peer_height(db, idx_sync_peer_height > ev ? idx_sync_peer_height : ev);  // db-monotonic
+-        }
++        // The handshake start_height is an unchecked claim: it stays this pass's
++        // live value (idx_sync_peer_height, dropped when the pass's connection
++        // closes) and is NEVER persisted or folded into best_known — one hostile
++        // peer advertising ~2^31 would otherwise pin namespace_synced false forever.
+         fprintf(stderr, "  no archive peer reachable — using limited peer %s\n", picked);
+     }
+     if (fb_fd >= 0) close(fb_fd);
+@@ -1837,7 +1854,7 @@ static int cmd_sync(int argc, char **argv) {
+         else idle++;
+     }
+     fprintf(stderr, "sync idle — caught up at height %lld\n", (long long)height);
+-    idx_peer_height_note(db, idx_sync_peer_height, (int64_t)time(NULL), 1);   // flush the rate-limited write
++    idx_peer_height_note(db, height, (int64_t)time(NULL), 1);   // flush: validated tip only, never the claim
+     if (idx_sync_peer_height > 0 && height >= idx_sync_peer_height)
+         s_parity = time(NULL);          // hard parity, measured on a live socket
+     idx_db_project(db, s);
+@@ -2142,6 +2159,9 @@ void idx_serve_peer_kick(void *peer, const char *why) {
      fprintf(stderr, "serve: %s dropped by the mesh carrier (%s)\n",
              sc->peer[0] ? sc->peer : "(peer)", why ? why : "-");
  }
@@ -2140,7 +2231,7 @@ index 2386b4f..bbe991c 100644
  int idx_serve_peer_exempt(void *peer) {
      SConn *sc = (SConn *)peer;
      if (sc->outbound) return 1;                      // a seat we chose to dial
-@@ -2989,6 +2992,16 @@ static int sock_last_err(void) {
+@@ -2989,6 +3009,16 @@ static int sock_last_err(void) {
  // The chain-wire presence (indexer.h). port 0 = dial-only. `dial_peers` =
  // comma host:port list kept connected. `mesh` non-NULL carries carrier gossip
  // as dn* commands on pepenet peers.
@@ -2157,7 +2248,7 @@ index 2386b4f..bbe991c 100644
  int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
                const char *dial_peers, volatile int *stop, const IdxMeshHooks *mesh) {
      ignore_sigpipe();
-@@ -3033,7 +3046,7 @@ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
+@@ -3033,7 +3063,7 @@ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
                            (int)(slash - dbpath), dbpath, coinname);
        else snprintf(serve_path, sizeof serve_path, "serve-%s.db", coinname); }
      ServeStore *ss = serve_store_open(serve_path);
@@ -2166,7 +2257,7 @@ index 2386b4f..bbe991c 100644
      int64_t our_h = 0; { uint8_t tip[32]; idx_db_load_sync(db, &our_h, tip); }
      if (port) fprintf(stderr, "serve: listening on 0.0.0.0:%u (agent %s, services 0x%llx)\n",
                        port, idx_sync_agent, (unsigned long long)services);
-@@ -3255,7 +3268,7 @@ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
+@@ -3255,7 +3285,7 @@ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
          for (int i = 0; i < SERVE_MAX_CONN; i++)        // L6: closes the carrier asked for
              if (conns[i].fd >= 0 && conns[i].mesh_kick) serve_drop(&conns[i], mesh);
  
@@ -2175,7 +2266,7 @@ index 2386b4f..bbe991c 100644
          if (lfd >= 0) { pfd[np].fd = lfd; pfd[np].events = POLLIN; map[np] = -1; np++; }
          for (int i = 0; i < SERVE_MAX_CONN; i++)
              if (conns[i].fd >= 0) {
-@@ -3263,7 +3276,12 @@ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
+@@ -3263,7 +3293,12 @@ int idx_serve(const char *coinname, const char *dbpath, uint16_t port,
                  pfd[np].events = POLLIN | ((conns[i].connecting || serve_out_pending(&conns[i])) ? POLLOUT : 0);
                  map[np] = i; np++;
              }
@@ -2188,6 +2279,37 @@ index 2386b4f..bbe991c 100644
          int start = 0;
          if (lfd >= 0 && (pfd[0].revents & POLLIN)) {
            for (;;) {
+diff --git a/indexer/src/test_sync.c b/indexer/src/test_sync.c
+index 86f8096..aaedb65 100644
+--- a/indexer/src/test_sync.c
++++ b/indexer/src/test_sync.c
+@@ -888,6 +888,26 @@ static void sec_peer_height(const char *dir) {
+       CHECK(idx_peer_height_note(d2, 500, 1000, 1) == 900, "load-seed: note 500 keeps in-memory best at 900");
+       CHECK(idx_db_get_peer_height(d2) == 900, "load-seed: DB stays 900");
+       idx_db_close(d2); unlink(q); }
++    // hostile start_height (No Good Deed): an old build persisted the raw
++    // handshake claim. A stored value above the validated tip + 2 is healed on
++    // load, for both 2^31-1 and 0xFFFFFFFF; tip+2 (honest announcement) is kept.
++    { const int64_t bad[2] = { 2147483647LL, 4294967295LL };
++      for (int i = 0; i < 2; i++) {
++        char q[256]; snprintf(q, sizeof q, "%s/ph_hostile%d.db", dir, i); unlink(q);
++        sqlite3 *d2 = idx_db_open(q); uint8_t tip[32] = {0};
++        idx_db_save_sync(d2, 1000, tip); idx_db_set_peer_height(d2, bad[i]);
++        CHECK(idx_db_get_peer_height(d2) == bad[i], "hostile: legacy claim stored by an old build");
++        idx_peer_height_reset(); idx_peer_height_load(d2);
++        CHECK(idx_db_get_peer_height(d2) == 1000, "hostile: load heals the stored claim to the validated tip");
++        CHECK(idx_peer_height_note(NULL, 0, 0, 0) == 1000, "hostile: in-memory best_known = validated tip");
++        CHECK(idx_peer_height_note(d2, 1001, 2000000, 1) == 1001 && idx_db_get_peer_height(d2) == 1001, "hostile: validated growth still raises");
++        idx_db_close(d2); unlink(q); }
++      char q[256]; snprintf(q, sizeof q, "%s/ph_keep.db", dir); unlink(q);
++      sqlite3 *d2 = idx_db_open(q); uint8_t tip[32] = {0};
++      idx_db_save_sync(d2, 1000, tip); idx_db_set_peer_height(d2, 1002);
++      idx_peer_height_reset(); idx_peer_height_load(d2);
++      CHECK(idx_db_get_peer_height(d2) == 1002, "hostile: tip+2 is within tolerance, kept");
++      idx_db_close(d2); unlink(q); }
+     idx_db_close(db); idx_peer_height_reset();
+     unlink(p);
+ }
 diff --git a/mesh/Makefile b/mesh/Makefile
 index a08cfe6..b118075 100644
 --- a/mesh/Makefile
@@ -2316,13 +2438,17 @@ index 1bca645..7274731 100644
  
  void dnsnet_status(DnsStatus *out);
 diff --git a/src/engine.c b/src/engine.c
-index c4bde2d..2355aa6 100644
+index c4bde2d..2203478 100644
 --- a/src/engine.c
 +++ b/src/engine.c
-@@ -455,7 +455,12 @@ void engine_status(EngineStatus *out) {
+@@ -454,8 +454,15 @@ void engine_status(EngineStatus *out) {
+     out->running = g->running; out->pass_active = g->pass_active;
      out->last_rc = g->last_rc;  out->passes = g->passes;
      pthread_mutex_unlock(&g->mu);
-     out->peer_height = idx_sync_peer_height;   // indexer.h seam (volatile, sync thread writes)
+-    out->peer_height = idx_sync_peer_height;   // indexer.h seam (volatile, sync thread writes)
++    // the sync pass's handshake claim lives only while that pass's connection
++    // does: between passes it is dropped, never kept (unchecked start_height)
++    out->peer_height = out->pass_active ? idx_sync_peer_height : 0;
 +    out->proj_height = -1;
 +    out->best_known = idx_peer_height_note(NULL, 0, 0, 0);   // read-only: no db, no write
      sqlite3 *db = read_db(); if (!db) return;
@@ -2348,7 +2474,7 @@ index edfd408..095463f 100644
  
  // one names-projection row, GUI-shaped (states are sm.h SM_OWNED..SM_RESERVED)
 diff --git a/src/gd_node.c b/src/gd_node.c
-index f7a6eb0..dcec04b 100644
+index f7a6eb0..24c1978 100644
 --- a/src/gd_node.c
 +++ b/src/gd_node.c
 @@ -9,6 +9,8 @@
@@ -2360,7 +2486,16 @@ index f7a6eb0..dcec04b 100644
  
  #include <errno.h>
  #include <signal.h>
-@@ -139,6 +141,19 @@ static void json_safe(char *dst, size_t cap, const char *src) {
+@@ -24,6 +26,8 @@
+ #include <arpa/inet.h>
+ #include <sys/socket.h>
+ 
++#define GD_CLAIM_WINDOW 288   /* = SERVE_BLOCK_WINDOW: credible live-claim range */
++
+ DeskWallet WLT;   // zeroed: this process has no wallet (dnsnet's publish path)
+ 
+ /* webproxy.c calls these on the default-instance path. greatdane-node always
+@@ -139,6 +143,19 @@ static void json_safe(char *dst, size_t cap, const char *src) {
      dst[o] = 0;
  }
  
@@ -2380,7 +2515,7 @@ index f7a6eb0..dcec04b 100644
  /* One status line (no trailing newline). Field set is append-only: older
   * readers ignore the new keys. */
  static void build_status(char *out, size_t cap, const char *coin, const char *dir) {
-@@ -165,6 +180,38 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
+@@ -165,6 +182,50 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
                        : ph <= 0 ? "connecting"
                        : es.height + 2 < ph ? "syncing" : "ready";
      char dd[600]; json_safe(dd, sizeof dd, dir);
@@ -2389,19 +2524,31 @@ index f7a6eb0..dcec04b 100644
 +     *   base   : height > 0 AND the names projection is complete up to our own
 +     *            block tip (proj_height >= height, or no projection written yet
 +     *            and height < activation = nothing to fold)
-+     *   online : a live peer tip is known (ph > 0)  -> synced iff height + 2 >= ph
-+     *            (so never while actively catching up)
++     *   online : a credible live peer tip is known (ph_cred > 0: the highest
++     *            live per-connection claim within GD_CLAIM_WINDOW of our tip)
++     *            -> synced iff height + 2 >= ph_cred (never while catching up)
 +     *   offline: at least one sync pass has finished (every dial candidate
 +     *            tried once) AND since then, continuously for the connect grace
 +     *            (GREATDANE_NODE_SYNC_GRACE_S, default 15 s), no live peer tip
-+     *            (ph == 0) and no connected peer AND not behind the best tip
-+     *            ever seen (persisted
-+     *            meta peer_height: best_known == 0 or height + 2 >= best_known)
++     *            (ph == 0) and no connected peer AND not behind the best
++     *            VALIDATED tip ever seen (meta peer_height, validated evidence
++     *            only: best_known == 0 or height + 2 >= best_known)
 +     * "basis" says which branch held: "peers", "offline" or "none". */
 +    int64_t up_s = (int64_t)(mono_s() - g_start_s);
 +    int proj_ok = es.proj_height >= es.height || (es.proj_height < 0 && es.height < es.activation);
 +    int base_ok = es.height > 0 && proj_ok;
-+    int ns_online = base_ok && ph > 0 && es.height + 2 >= ph;
++    /* online uses only CREDIBLE live claims: a handshake start_height more than
++     * GD_CLAIM_WINDOW blocks above our validated tip is unchecked and cannot be
++     * the reason we are "behind" when a peer within the window agrees with us
++     * (a hostile ~2^31 claim is ignored). If every live claim is far ahead,
++     * ph_cred == 0 and online stays false: we really may be catching up. Claims
++     * are per connection and vanish when it closes (never persisted). */
++    int64_t ph_cred = 0, lim = es.height + GD_CLAIM_WINDOW;
++    if (es.peer_height > 0 && es.peer_height <= lim) ph_cred = es.peer_height;
++    for (int i = 0; i < nc; i++)
++        if (cs[i].connected && cs[i].up && cs[i].peer_height > 0 &&
++            cs[i].peer_height <= lim && cs[i].peer_height > ph_cred) ph_cred = cs[i].peer_height;
++    int ns_online = base_ok && ph_cred > 0 && es.height + 2 >= ph_cred;
 +    /* offline must HOLD for the whole grace: no peer tip and no connection,
 +     * continuously, since the first finished sync pass (a mesh dial that lands
 +     * later resets it; build_status runs on the one stdio thread) */
@@ -2419,7 +2566,7 @@ index f7a6eb0..dcec04b 100644
      snprintf(out, cap,
          "{\"event\":\"status\",\"coin\":\"%s\",\"height\":%lld,"
          "\"peer_height\":%lld,\"activation\":%lld,\"engine\":%d,"
-@@ -173,24 +220,48 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
+@@ -173,24 +234,48 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
          "\"dane_fail\":%lld,\"listen\":\"%s\",\"listen_port\":%d,"
          "\"listen_errno\":%d,\"listen_error\":\"%s\","
          "\"state\":\"%s\",\"sync_pct\":%.1f,\"peers_in\":%d,\"peers_out\":%d,"
@@ -2471,7 +2618,7 @@ index f7a6eb0..dcec04b 100644
          else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) seeds = argv[++i];
          else if (!strcmp(argv[i], "--no-listen")) listen_port = 0;
          else if (!strcmp(argv[i], "--snapshot") && i + 1 < argc) snap_dir = argv[++i];
-@@ -205,10 +276,34 @@ int main(int argc, char **argv) {
+@@ -205,10 +290,34 @@ int main(int argc, char **argv) {
          }
          else {
              fprintf(stderr, "usage: greatdane-node --data <dir> --only pep|doge [--ephemeral-ports] [--dane-api] [--stdio] [--seeds host[:port],...]\n"

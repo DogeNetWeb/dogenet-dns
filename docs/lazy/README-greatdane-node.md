@@ -68,15 +68,21 @@ all of those APIs unchanged.
 
 * **base:** `height > 0`, and the names projection covers our own block tip
   (`proj_height >= height`, or no projection yet and `height < activation`).
-* **online, basis `"peers"`:** a live peer tip is known (`ph > 0`, from the sync
-  pass handshake or a live serve peer), and `height + 2 >= ph`. It is never true
-  while the node is catching up.
+* **online, basis `"peers"`:** a CREDIBLE live peer tip is known: `ph_cred` = the
+  highest live per-connection claim (sync-pass handshake while that pass runs, or a
+  connected serve peer) that is at most 288 blocks above our validated tip. Synced
+  iff `ph_cred > 0` and `height + 2 >= ph_cred`. Never true while catching up; a
+  single hostile claim far above the tip (e.g. 2^31-1) is ignored when a peer within
+  the window agrees. If EVERY live claim is far ahead it stays false (we may really
+  be behind). Claims are never persisted and vanish with their connection (v3).
 * **offline, basis `"offline"`:** all of the following hold:
   * at least one sync pass has finished;
   * since then, for `GREATDANE_NODE_SYNC_GRACE_S` (default 15 s) without a
     break, there has been no live peer tip and no connected peer;
-  * the node is not behind the best tip it ever saw: `best_known_height == 0`,
-    or `height + 2 >= best_known_height` (persisted meta `peer_height`).
+  * the node is not behind the best VALIDATED tip it ever saw: `best_known_height == 0`,
+    or `height + 2 >= best_known_height` (meta `peer_height`, which since v3 holds only
+    validated evidence: our own connected blocks and announcements of blocks already
+    on our chain; a stored value above tip + 2 written by an older build is healed on load).
 * **otherwise:** false, basis `"none"`. A peer that connects later and shows a
   higher tip flips it back to false at once. Dane should follow the live value
   and not latch it. A fixture with `height == 0` is never synced.
@@ -94,4 +100,25 @@ all of those APIs unchanged.
 4. check-lazy paths for this tree.
 
 Run `test/gd_node_test.sh` inside `unshare -rn`. It adds lazy-01..03.
+
+## Fixes in v3 (No Good Deed review: hostile start_height)
+
+* **Root cause.** `indexer/src/sync.c` raised the persisted meta `peer_height` with the
+  sync peer's unchecked `version.start_height` (two `idx_db_raise_peer_height` calls
+  after the handshake) and flushed `idx_sync_peer_height` at the end of a pass;
+  `idx_peer_height_note` only ever raises, and nothing but tests reset it. One peer
+  advertising ~2^31 therefore pinned `best_known_height` forever and
+  `namespace_synced` stayed false offline.
+* **Fix (no wire change).** The handshake claim is never persisted or folded into
+  best_known; the pass-end flush notes our validated tip; `idx_peer_height_load`
+  heals a stored value above the validated tip + 2 (`idx_db_heal_peer_height`, the
+  only lowering writer); `engine_status().peer_height` reports the sync claim only
+  while the pass (its connection) is active; `namespace_synced` online uses
+  credible claims only (above). Same indexer fix on the DogeNet branch.
+* **Tests.** indexer `test_sync`: hostile 2^31-1 and 0xFFFFFFFF stored claims are
+  healed, validated growth still raises, tip+2 is kept. Black-box
+  `gd_hostile_height.py` (evidence) H1-H5 under `unshare -rn`: hostile-only peer then
+  gone -> synced offline, nothing persisted; legacy db healed; hostile + honest peer
+  both connected -> synced (basis peers); hostile-only still connected -> false
+  (documented: indistinguishable from being behind without validated headers).
 

@@ -1,6 +1,7 @@
-# DogeNet lazy node: DESIGN (keeper/lazy-node, private)
+# DogeNet lazy node: DESIGN (keeper/lazy-node, non-main branch)
 
-Status: built and tested on a private branch only. Not deployed, not pushed publicly, no seed touched.
+Status: built and tested on the keeper/lazy-node branch only (a non-main branch; nowon asked on Nov 18 for all
+branches to be mirrored to GitHub as non-main branches). Not merged to main, not deployed, no seed touched.
 Scope: dogenet-dns `dnsd` plus the mesh glue, and the node Dane embeds (greatdane-node, as a patch).
 Full mode is still the default. Without `--lazy`, behaviour is unchanged apart from these local
 changes: the empty-answer, digest and rate rules apply only to lazy fetches, and the wake fd is set only in lazy mode.
@@ -321,12 +322,13 @@ Rejected: it changes on-chain formats and puts data on chain. nowon: "Definitely
 
 **Next step if approved:** Option 2 only. Known limit stays: a peer withholding both the new head and the new ops still wins against a lazy node that asks only that peer, so lazy fetch keeps asking 2+ peers.
 
-## 11. Lazy service bit (BUILT on the private branch only, 230efff — PROTOCOL CHANGE, not approved to ship)
+## 11. Lazy service bit (BUILT on the keeper/lazy-node branch only, 230efff — PROTOCOL CHANGE, not approved to ship)
 
-**Approval status.** nowon approved BUILDING the lazy service bit on the private branch only
+**Approval status.** nowon approved BUILDING the lazy service bit on a non-main branch only
 (his words, relayed by ITFH: "Yes, add the lazy service bit"). That is not approval to ship it:
 deploying it to any seed or node, merging it to main, or shipping it in a release is still a
-PROTOCOL CHANGE that needs nowon's explicit sign-off.
+PROTOCOL CHANGE that needs nowon's explicit sign-off. (Mirroring the branch to GitHub as a
+non-main branch, per nowon's Nov 18 request, is not shipping.)
 
 **Wire.** The existing Bitcoin-lineage `version` message, field `services`
 (uint64 LE, payload bytes 4..11). A lazy node ORs in **bit 24 = 0x0000000001000000**
@@ -394,12 +396,12 @@ Reported on the c17a0f40 patch (BIS build on clean 35047fd, 0 warnings, gd_node_
 2. **namespace_synced on an isolated/offline node.** Exact rule (greatdane-node `build_status`):
    * base: `height > 0` AND the names projection covers our own block tip
      (`proj_height >= height`, or no projection yet and `height < activation`, i.e. nothing to fold);
-   * **online** (`basis "peers"`): a live peer tip is known (`ph = max(pass handshake, live serve peers) > 0`) and
+   * **online** (`basis "peers"`; v3: credible claims only, see §14): a live peer tip is known (`ph = max(pass handshake, live serve peers) > 0`) and
      `height + 2 >= ph`. So it is never true while the node is catching up;
    * **offline** (`basis "offline"`): at least one sync pass has finished (every dial candidate was tried once), and
      since then, continuously for the connect grace (`GREATDANE_NODE_SYNC_GRACE_S`, default 15 s, 0–600), there has been
      no live peer tip and no connected peer, AND we are not behind the best tip ever seen (`best_known_height` =
-     persisted meta `peer_height`; `0` = never heard one, else `height + 2 >= best_known_height`);
+     meta `peer_height`, validated evidence only since v3 (§14); `0` = never heard one, else `height + 2 >= best_known_height`);
    * otherwise false (`basis "none"`). A peer that connects later and shows a higher tip turns it false again at
      once, so Dane must follow the live value. Offline "synced" means "complete up to the newest tip this node knows
      of". A name claimed after that tip reads `unowned` until a peer is reachable. That is the price of opening the TLDs
@@ -420,7 +422,47 @@ for /gd/tlsa and CONNECT). Evidence: `tests/crashfix/` and `tools/gd_lazy_offlin
 `tools/null_row_probe.py`, `tools/bis_probe_tlsa_crash.py`.
 
 
-Built and committed as **4547997** on keeper/lazy-node (private). DogeNet-side re-run on the rebuilt dnsd (bin/dnsd-lazy-dfc42b6f, with the db.c fix):
+Built and committed as **4547997** on keeper/lazy-node. DogeNet-side re-run on the rebuilt dnsd (bin/dnsd-lazy-dfc42b6f, with the db.c fix):
 the suites match 230efff (net_test N7 is the known defect, and loop_test_legacy fails by design); adv 14/14 PASS release and 14/14 PASS under ASan/UBSan (no sanitizer reports, including no_peers);
 interop vs live 8605e98c 8/8 PASS (OOO/NNN/ONO/NON x out/in), 0 bad frames. greatdane-node side: gd_node_test 84/0 (release and ASan),
 check-lazy 49/0 with 0 warnings, and the in-tree PepeNet suites all pass.
+
+## 14. v3: best_known_height from validated evidence only (No Good Deed review)
+
+**Finding.** `best_known_height` (meta `peer_height`) was fed by the sync peer's unchecked `version.start_height`:
+after each handshake `sync.c` called `idx_db_raise_peer_height(db, claim)`, and the pass-end flush noted
+`idx_sync_peer_height`; every writer is a monotonic max and only tests reset it. One hostile peer advertising
+~2^31 inflated it forever, so the offline `namespace_synced` rule (`height + 2 >= best_known`) stayed false.
+DogeNet `namespace-indexer/src/sync.c` had the same code (reproduced: an old dnsd persisted 2147483647 after one
+handshake with a fake peer).
+
+**Fix (both trees; no wire, on-chain or rent change).**
+* The handshake claim is never persisted and never folded into `g_ph_best`; it stays the pass's live value only.
+* The pass-end flush notes our validated tip (`height`), not the claim.
+* `idx_peer_height_load()` heals a stored value above the validated tip + 2 (a legacy claim from an older build)
+  down to the tip via `idx_db_heal_peer_height()` (the only lowering writer) and logs one line.
+* Remaining feeders are validated: blocks we connect, and serve-plane announcements of blocks already on our
+  chain (+1 for a block whose parent is).
+* greatdane-node: `engine_status().peer_height` reports the sync claim only while the pass (its connection) is
+  active; `namespace_synced` online uses credible live claims only (per connection, at most 288 blocks above our
+  validated tip), so a far claim is ignored when a peer within the window agrees. If every live claim is far
+  ahead it stays false: without validated headers we cannot tell a liar from being behind (documented residual,
+  bounded to while that peer stays connected).
+* Trade-off: a node that went offline mid catch-up now reports offline-synced at its own tip (it no longer
+  remembers an unvalidated higher claim). That is the price of not trusting claims.
+
+**Tests.** indexer `test_sync` (both trees): stored 2^31-1 and 0xFFFFFFFF are healed to the tip, in-memory
+best_known = tip, validated growth still raises, tip+2 kept. Black-box under `unshare -rn`:
+`gd_hostile_height.py` H1/H2 hostile-only peer (2^31-1 / 0xFFFFFFFF) then gone -> synced (offline), nothing
+persisted; H3 legacy db healed -> synced; H4 hostile + honest peer both connected -> synced (basis peers);
+H5 hostile-only still connected -> false. The v2 binary fails H3/H4. DogeNet `doge_hostile_height.py`: the old
+dnsd persists 2147483647 (D1) and never heals (D3); the fixed dnsd persists nothing and heals.
+greatdane-node offline/online sync-rule test: case B (stored 5000 above tip 1000) now heals and reports synced.
+
+**Patch v3:** `docs/lazy/greatdane-node-lazy-35047fd.patch` sha256
+`265a5eec6137842c14b5e20087080d8634ae53d351660d8bcd3c41fe4ee27b83` (v2 was 96505362). Clean 35047fd + `git apply`:
+greatdane-node Release 0 warnings, sha256 `f59c3c860b594f6b887e8f9874fcc89d3c9d61c1099c62c054d8e36db2b1c5ed`
+(box-specific). gd_node_test 84/0, check-lazy 49/0 (0 warnings), in-tree suites all pass (state_dns 40, wire 88,
+zone 103, dnsd_core 75, net 56, antispam 35, p2p 67, lazy 49, mesh check), sync rule PASS, hostile H1-H5 PASS,
+offline 35 s PASS. Fixture for Dane: [FIXTURE-2NODE.md](FIXTURE-2NODE.md).
+
