@@ -1,0 +1,70 @@
+# CI for DogeNetWeb/dogenet-dns — build + unit/regression tests on x86_64 and arm64.
+# Free GitHub-hosted runners (public repo). No secrets, no deploy, no network
+# beyond cloning sibling public repos; tests bind loopback only.
+#
+# Skipped on purpose (documented, not hidden):
+#   - check-gossip (test/net_test): known N7 livelock, tracked separately.
+#   - check-loop-legacy: expected to fail by design (pre-limiter baseline).
+#   - t_webproxy (binds 8443/8444) is in the tls repo, not run here.
+#   Runs: check (state + tcp_loris), check-all, check-antispam, check-p2p,
+#   check-loop, dns_chain_test.
+name: ci
+on:
+  push:
+    branches: [main, 'ci/**', 'keeper/**', 'fix/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: deps
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends libsqlite3-dev cmake
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: dogenet-dns
+          submodules: false
+          persist-credentials: false
+      - name: sibling repos (same branch if present, else main)
+        env:
+          BR: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+          for r in namespace-indexer dogenet-mesh namespace-protocol; do
+            u="https://github.com/DogeNetWeb/${r}.git"
+            b=main; git ls-remote --exit-code --heads "$u" "$BR" >/dev/null 2>&1 && b="$BR"
+            echo "$r @ $b"
+            git clone -q --depth 1 --branch "$b" --recurse-submodules --shallow-submodules "$u" "$r"
+            git -C "$r" log -1 --format='  %h %s'
+          done
+      - name: build
+        working-directory: dogenet-dns
+        env:
+          CFLAGS: -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wshadow
+        run: |
+          make -C ../namespace-indexer build/secp/lib/libsecp256k1.a
+          make -C ../dogenet-mesh libdogenetnet.a
+          make -j"$(nproc)"
+      - name: test
+        working-directory: dogenet-dns
+        timeout-minutes: 20
+        env:
+          CFLAGS: -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wshadow
+        run: |
+          rc=0
+          for t in check check-all check-antispam check-p2p check-loop dns_chain_test; do
+            echo "=== make $t"
+            if [ "$t" = dns_chain_test ]; then make dns_chain_test && ./dns_chain_test || rc=1; else make "$t" || rc=1; fi
+          done
+          exit "$rc"
