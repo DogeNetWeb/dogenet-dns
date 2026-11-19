@@ -414,3 +414,8 @@ Tests (all under `unshare -Urn`): gd_node_test gains lazy-01..03 (NULL-seller fi
 for /gd/tlsa and CONNECT). Evidence: `tests/crashfix/` and `tools/gd_lazy_offline.py`, `tools/gd_sync_rule.py`,
 `tools/null_row_probe.py`, `tools/bis_probe_tlsa_crash.py`.
 
+
+Built and committed as **4547997** on keeper/lazy-node (private). DogeNet-side re-run on the rebuilt dnsd (bin/dnsd-lazy-dfc42b6f, with the db.c fix):
+the suites match 230efff (net_test N7 is the known defect, and loop_test_legacy fails by design); adv 14/14 PASS release and 14/14 PASS under ASan/UBSan (no sanitizer reports, including no_peers);
+interop vs live 8605e98c 8/8 PASS (OOO/NNN/ONO/NON x out/in), 0 bad frames. greatdane-node side: gd_node_test 84/0 (release and ASan),
+check-lazy 49/0 with 0 warnings, and the in-tree PepeNet suites all pass.
