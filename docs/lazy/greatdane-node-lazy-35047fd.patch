@@ -11,10 +11,10 @@ index 135a4aa..51fab43 100644
      src/dirscan.c
      src/zonekey.c
 diff --git a/dns/Makefile b/dns/Makefile
-index 984b7f3..0477621 100644
+index 984b7f3..5befe20 100644
 --- a/dns/Makefile
 +++ b/dns/Makefile
-@@ -19,7 +19,7 @@
+@@ -19,11 +19,20 @@
  # see state_dns_test.
  
  CC      ?= cc
@@ -22,8 +22,21 @@ index 984b7f3..0477621 100644
 +CFLAGS  ?= -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wshadow
  
  # ── sibling repos (relative, as the pepenet repo family does) ────────────────
++# Two layouts: the pepenet repo family (../pepenet-mesh, ../namespace-indexer)
++# and the pepenet-desktop monorepo (../mesh, ../indexer). Pick the one that is
++# there; override with `make MESHDIR=... IDX=...`.
++MESHDIR ?= $(patsubst %/src/state.c,%,$(firstword $(wildcard ../pepenet-mesh/src/state.c ../mesh/src/state.c)))
++IDX     ?= $(patsubst %/src/db.c,%,$(firstword $(wildcard ../namespace-indexer/src/db.c ../indexer/src/db.c)))
++ifeq ($(strip $(MESHDIR)),)
  MESHDIR := ../pepenet-mesh
-@@ -46,7 +46,7 @@ IDX_SRC    := $(addprefix $(IDXSRC)/,attrib.c adapter.c oracle_feed.c db.c chain
++endif
++ifeq ($(strip $(IDX)),)
+ IDX     := ../namespace-indexer
++endif
+ 
+ # the single protocol pin (the indexer's) + its vendored libsecp + secp shim
+ SMDIR    := $(IDX)/protocol/impls/c/src
+@@ -46,7 +55,7 @@ IDX_SRC    := $(addprefix $(IDXSRC)/,attrib.c adapter.c oracle_feed.c db.c chain
  MESH_SRC   := $(addprefix $(MESHDIR)/src/,crypto.c view.c wire.c state.c)
  # the DNS overlay + the dnsd driver
  DNS_SRC    := src/dns_state.c src/dns_chain.c src/dns_net.c src/zone.c \
@@ -32,7 +45,7 @@ index 984b7f3..0477621 100644
  
  INC_IDX  := -I$(IDXSRC) -I$(SECP_I) -I$(SMDIR)
  INC_MESH := -I$(MESHDIR)/include -I$(SMDIR)
-@@ -90,11 +90,11 @@ dns-cli: src/dns-cli.c
+@@ -90,11 +99,11 @@ dns-cli: src/dns-cli.c
  # fake chain oracle — not the chain-wire node. Links the shared mesh's prebuilt
  # lib (it bundles sp_state + the hash/secp shim), same as the old codec tests.
  NETLIB   := $(MESHDIR)/libpepenetnet.a
@@ -46,7 +59,7 @@ index 984b7f3..0477621 100644
  
  state_dns_test: $(TEST_SRC) $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
  	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(TEST_SRC) $(NETLIB) $(IDXSECP) -lsqlite3
-@@ -120,7 +120,7 @@ clean:
+@@ -120,7 +129,7 @@ clean:
  # indexer's vendored secp), never the indexer sources.
  WIRE_SRC := test/wire_test.c src/dns_wire.c
  ZONE_SRC := test/zone_test.c src/zone.c src/dns_wire.c src/dns_state.c
@@ -55,7 +68,7 @@ index 984b7f3..0477621 100644
  
  wire_test: $(WIRE_SRC) $(wildcard src/*.h)
  	$(CC) $(CFLAGS) -Isrc -o $@ $(WIRE_SRC)
-@@ -158,7 +158,7 @@ clean-tests:
+@@ -158,7 +167,7 @@ clean-tests:
  #
  #   make check-gossip     peer table, hostile frames, 200k-mutation fuzz,
  #                         inv/get/dat semantics, the hold queue, convergence
@@ -64,7 +77,7 @@ index 984b7f3..0477621 100644
  
  net_test: $(NET_SRC) $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
  	$(CC) $(CFLAGS) $(INC_TEST) -o $@ $(NET_SRC) $(NETLIB) $(IDXSECP) -lsqlite3
-@@ -172,7 +172,7 @@ check-gossip: net_test
+@@ -172,7 +181,7 @@ check-gossip: net_test
  antispam_test: test/antispam_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
  	@mkdir -p build
  	$(CC) $(CFLAGS) $(INC_TEST) -Dtime=ft_time -DDNSNET_TEST_CLOCK_MS=ft_ms -c src/dns_net.c -o build/antispam_dns_net.o
@@ -73,7 +86,7 @@ index 984b7f3..0477621 100644
  
  check-antispam: antispam_test
  	./antispam_test
-@@ -184,9 +184,21 @@ check-antispam: antispam_test
+@@ -184,9 +193,21 @@ check-antispam: antispam_test
  p2p_test: test/p2p_test.c src/dns_net.c $(wildcard src/*.h) $(NETLIB) $(IDXSECP)
  	@mkdir -p build
  	$(CC) $(CFLAGS) $(INC_TEST) -Dtime=ft_time -DDNSNET_TEST_CLOCK_MS=ft_ms -c src/dns_net.c -o build/p2p_dns_net.o
@@ -1390,7 +1403,7 @@ index 00e42f3..48649f2 100644
  
      sp_state_close(g_st); dns_chain_close(g_ch);
 diff --git a/dns/src/dnsd_core.c b/dns/src/dnsd_core.c
-index 46bba33..1c4ec2f 100644
+index 46bba33..2476747 100644
 --- a/dns/src/dnsd_core.c
 +++ b/dns/src/dnsd_core.c
 @@ -1,8 +1,12 @@
@@ -1407,7 +1420,28 @@ index 46bba33..1c4ec2f 100644
  
  #include <stdio.h>
  #include <string.h>
-@@ -53,9 +57,21 @@ static void resp_start(dns_resp *r, uint8_t *out, size_t cap, size_t limit,
+@@ -17,13 +21,18 @@
+ #include <sys/socket.h>
+ #include <netinet/in.h>
+ 
++/* bounded copy, truncating like snprintf("%s") (no -Wformat-truncation noise) */
++static void copy_trunc(char *d, size_t cap, const char *s) {
++    size_t n = strlen(s); if (n >= cap) n = cap - 1;
++    memcpy(d, s, n); d[n] = '\0';
++}
+ static void split_apex(const char *left, char *apex, size_t acap, char *sub, size_t scap) {
+     const char *dot = strrchr(left, '.');
+     if (dot) {
+-        snprintf(apex, acap, "%s", dot + 1);
++        copy_trunc(apex, acap, dot + 1);
+         size_t n = (size_t)(dot - left); if (n >= scap) n = scap - 1;
+         memcpy(sub, left, n); sub[n] = '\0';
+-    } else { snprintf(apex, acap, "%s", left); sub[0] = '\0'; }
++    } else { copy_trunc(apex, acap, left); sub[0] = '\0'; }
+ }
+ 
+ /* Does `sub` publish a DANE record at _443._tcp? (drives tls_redirect.) */
+@@ -53,9 +62,21 @@ static void resp_start(dns_resp *r, uint8_t *out, size_t cap, size_t limit,
  /* Build the full response for `q` into out[cap]. `over_tcp` lifts the 512/EDNS
   * UDP budget to the whole buffer (TCP has no such limit). Returns the response
   * length (a well-formed query always yields at least a header+question). */
@@ -1429,7 +1463,7 @@ index 46bba33..1c4ec2f 100644
      size_t budget;
      if (over_tcp)      budget = cap;
      else if (q->edns)  budget = q->udp_payload < 512 ? 512
-@@ -88,6 +104,33 @@ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
+@@ -88,6 +109,33 @@ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
                  q->qname, apex, sub[0] ? sub : "@", owned, q->edns, over_tcp);
      if (!owned) { resp_start(&r, out, cap, limit, q, DNS_RCODE_NXDOMAIN); goto done; }
  
@@ -1463,7 +1497,7 @@ index 46bba33..1c4ec2f 100644
      zone z; dns_state_zone_owned(dc->st, apex, owner, &z);   /* G1: current owner's rows only */
      resp_start(&r, out, cap, limit, q, DNS_RCODE_NOERROR);
  
-@@ -121,11 +164,13 @@ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
+@@ -121,11 +169,13 @@ size_t dnsd_core_answer(DnsdCore *dc, const dns_query *q,
          resp_start(&r, out, cap, limit, q, DNS_RCODE_NXDOMAIN);
  
  done:;
@@ -1478,7 +1512,7 @@ index 46bba33..1c4ec2f 100644
  static void serve_udp(DnsdCore *dc) {
      uint8_t buf[4096];
      struct sockaddr_storage cli; socklen_t cl = sizeof cli;
-@@ -134,10 +179,46 @@ static void serve_udp(DnsdCore *dc) {
+@@ -134,10 +184,46 @@ static void serve_udp(DnsdCore *dc) {
      dns_query q;
      if (dns_parse_query(buf, (size_t)n, &q) != 0) return;
      uint8_t out[4096];
@@ -1525,7 +1559,7 @@ index 46bba33..1c4ec2f 100644
  /* ── TCP (RFC 7766), non-blocking ─────────────────────────────────────────────
   * The resolver thread also answers UDP, so TCP must never block it. The old
   * inline loop (3 s SO_RCVTIMEO per read, served until EOF) let ONE client that
-@@ -220,7 +301,19 @@ static int tcp_answer(DnsdCore *dc, DnsdTcpConn *t) {
+@@ -220,7 +306,19 @@ static int tcp_answer(DnsdCore *dc, DnsdTcpConn *t) {
          if (t->in_len < 2 + mlen) break;
          dns_query q;
          if (dns_parse_query(t->in + 2, mlen, &q) != 0) return -1;
@@ -1546,7 +1580,7 @@ index 46bba33..1c4ec2f 100644
          if (rn == 0 || rn > 65535) return -1;
          t->out = malloc(rn + 2);
          if (!t->out) return -1;
-@@ -304,7 +397,11 @@ int dnsd_core_poll(DnsdCore *dc, int timeout_ms) {
+@@ -304,7 +402,11 @@ int dnsd_core_poll(DnsdCore *dc, int timeout_ms) {
          int64_t d = d1 < d2 ? d1 : d2;
          if (next < 0 || d < next) next = d;
      }
@@ -1558,7 +1592,7 @@ index 46bba33..1c4ec2f 100644
      if (next >= 0) { int64_t left = next - now; if (left < 0) left = 0; if (wait < 0 || left < wait) wait = (int)left; }
      int pr = poll(pfd, (nfds_t)nf, wait);
      int served = 0;
-@@ -318,6 +415,16 @@ int dnsd_core_poll(DnsdCore *dc, int timeout_ms) {
+@@ -318,6 +420,16 @@ int dnsd_core_poll(DnsdCore *dc, int timeout_ms) {
              }
          }
      }
@@ -1984,6 +2018,92 @@ index bb60f1b..af78bce 100644
  /* zone_test.c — src/zone.c (the zone-file / record-text front door) and the
   * sp_state record key it feeds (dns_key_pack/unpack in src/dns_state.c).
   *
+diff --git a/indexer/src/db.c b/indexer/src/db.c
+index 1c2289c..f4b0c32 100644
+--- a/indexer/src/db.c
++++ b/indexer/src/db.c
+@@ -942,36 +942,60 @@ int idx_db_ckpt_seed(sqlite3 *db, SmState *s) {
+     return -1;
+ }
+ 
++/* A names/muts row written by this indexer always carries 20-byte owner/seller/
++ * buyer blobs, but a hand-made fixture or a damaged db may hold NULL or short
++ * values there. sqlite3_column_blob() returns NULL for those, and copying from it
++ * crashed the sync thread on its first pass (greatdane-node: SIGSEGV seconds after
++ * start, whatever the lazy wait). Copy only exact-size blobs; zero-fill (= "none")
++ * otherwise. Valid dbs are unaffected (no format change). */
++static int col_blob_exact(sqlite3_stmt *st, int col, uint8_t *dst, int n) {
++    const void *b = sqlite3_column_blob(st, col);
++    if (b && sqlite3_column_bytes(st, col) == n) { memcpy(dst, b, (size_t)n); return 1; }
++    memset(dst, 0, (size_t)n);
++    return 0;
++}
++
+ int idx_db_load_state(sqlite3 *db, SmState *s) {
+-    int n = 0; sqlite3_stmt *st;
++    int n = 0, bad = 0; sqlite3_stmt *st;
+     sqlite3_prepare_v2(db, "SELECT name,owner,owner_type,lease_expiry,st,seller,seller_type,price,offer_expiry,buyer,burn_leg,pay_leg,reserve_expiry FROM names", -1, &st, NULL);
+     while (sqlite3_step(st) == SQLITE_ROW) {
+         const char *name = (const char *)sqlite3_column_text(st, 0); int nl = sqlite3_column_bytes(st, 0);
++        if (!name || nl <= 0 || nl > SM_NAME_MAX) { bad++; continue; }   /* NULL/empty/overlong key: not a name */
+         SmNameRow *r = sm_add_name(s, name, (size_t)nl);
+-        memcpy(r->owner, sqlite3_column_blob(st, 1), 20); r->owner_type = (uint8_t)sqlite3_column_int(st, 2);
++        if (!r) continue;
++        if (!col_blob_exact(st, 1, r->owner, 20)) bad++;
++        r->owner_type = (uint8_t)sqlite3_column_int(st, 2);
+         r->lease_expiry = sqlite3_column_int64(st, 3); r->st = (SmNameState)sqlite3_column_int(st, 4);
+-        memcpy(r->seller, sqlite3_column_blob(st, 5), 20); r->seller_type = (uint8_t)sqlite3_column_int(st, 6);
++        if (!col_blob_exact(st, 5, r->seller, 20)) bad++;
++        r->seller_type = (uint8_t)sqlite3_column_int(st, 6);
+         r->price = (uint64_t)sqlite3_column_int64(st, 7); r->offer_expiry = sqlite3_column_int64(st, 8);
+-        memcpy(r->buyer, sqlite3_column_blob(st, 9), 20);
++        if (!col_blob_exact(st, 9, r->buyer, 20)) bad++;
+         r->burn_leg = (uint64_t)sqlite3_column_int64(st, 10); r->pay_leg = (uint64_t)sqlite3_column_int64(st, 11);
+         r->reserve_expiry = sqlite3_column_int64(st, 12); n++;
+     }
+     sqlite3_finalize(st);
+     sqlite3_prepare_v2(db, "SELECT commitment,commit_height,tx_index,commit_time FROM commits", -1, &st, NULL);
+     while (sqlite3_step(st) == SQLITE_ROW) {
++        if (!sqlite3_column_blob(st, 0) || sqlite3_column_bytes(st, 0) != 32) { bad++; continue; }
+         sm_commit_add(s, sqlite3_column_blob(st, 0), sqlite3_column_int64(st, 1), (uint32_t)sqlite3_column_int64(st, 2), sqlite3_column_int64(st, 3)); n++;
+     }
+     sqlite3_finalize(st);
+     sqlite3_prepare_v2(db, "SELECT owner,height FROM muts", -1, &st, NULL);
+-    while (sqlite3_step(st) == SQLITE_ROW) { sm_bump_mutation(s, sqlite3_column_blob(st, 0), sqlite3_column_int64(st, 1)); n++; }
++    while (sqlite3_step(st) == SQLITE_ROW) {
++        if (!sqlite3_column_blob(st, 0) || sqlite3_column_bytes(st, 0) != 20) { bad++; continue; }
++        sm_bump_mutation(s, sqlite3_column_blob(st, 0), sqlite3_column_int64(st, 1)); n++;
++    }
+     sqlite3_finalize(st);
++    if (bad) {
++        fprintf(stderr, "db: %d malformed row field(s) (NULL/short blob) zero-filled or skipped on load\n", bad);
++    }
+     return n;
+ }
+ 
+ int idx_db_resolve(sqlite3 *db, const char *name, char owner_hex[41], char *state_out) {
+     sqlite3_stmt *st; sqlite3_prepare_v2(db, "SELECT owner,st FROM names WHERE name=?", -1, &st, NULL);
+     sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC); int found = 0;
+-    if (sqlite3_step(st) == SQLITE_ROW) { tohex(sqlite3_column_blob(st, 0), 20, owner_hex); if (state_out) *state_out = (char)sqlite3_column_int(st, 1); found = 1; }
++    if (sqlite3_step(st) == SQLITE_ROW) { uint8_t ow[20]; col_blob_exact(st, 0, ow, 20); tohex(ow, 20, owner_hex); if (state_out) *state_out = (char)sqlite3_column_int(st, 1); found = 1; }
+     sqlite3_finalize(st); return found;
+ }
+ int idx_db_name_row(sqlite3 *db, const char *name, IdxNameRow *out) {
+@@ -980,11 +1004,11 @@ int idx_db_name_row(sqlite3 *db, const char *name, IdxNameRow *out) {
+     sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+     if (sqlite3_step(st) == SQLITE_ROW) {
+         memset(out, 0, sizeof *out);
+-        memcpy(out->owner, sqlite3_column_blob(st, 0), 20); out->owner_type = (uint8_t)sqlite3_column_int(st, 1);
++        col_blob_exact(st, 0, out->owner, 20); out->owner_type = (uint8_t)sqlite3_column_int(st, 1);
+         out->lease_expiry = sqlite3_column_int64(st, 2); out->st = sqlite3_column_int(st, 3);
+-        memcpy(out->seller, sqlite3_column_blob(st, 4), 20); out->seller_type = (uint8_t)sqlite3_column_int(st, 5);
++        col_blob_exact(st, 4, out->seller, 20); out->seller_type = (uint8_t)sqlite3_column_int(st, 5);
+         out->price = (uint64_t)sqlite3_column_int64(st, 6); out->offer_expiry = sqlite3_column_int64(st, 7);
+-        memcpy(out->buyer, sqlite3_column_blob(st, 8), 20);
++        col_blob_exact(st, 8, out->buyer, 20);
+         out->burn_leg = (uint64_t)sqlite3_column_int64(st, 9); out->pay_leg = (uint64_t)sqlite3_column_int64(st, 10);
+         out->reserve_expiry = sqlite3_column_int64(st, 11); found = 1;
+     }
 diff --git a/indexer/src/indexer.h b/indexer/src/indexer.h
 index a1fd701..c77a92f 100644
 --- a/indexer/src/indexer.h
@@ -2068,6 +2188,32 @@ index 2386b4f..bbe991c 100644
          int start = 0;
          if (lfd >= 0 && (pfd[0].revents & POLLIN)) {
            for (;;) {
+diff --git a/mesh/Makefile b/mesh/Makefile
+index a08cfe6..b118075 100644
+--- a/mesh/Makefile
++++ b/mesh/Makefile
+@@ -22,13 +22,21 @@ AR      ?= ar
+ 
+ # Protocol-sm primitives (SHA-256 / RIPEMD-160 / secp_* interface + shim).
+ # Live namespace-protocol — not social's (often lagging) submodule pin.
++# pepenet repo family: ../namespace-protocol; pepenet-desktop monorepo: the
++# indexer's own pin at ../indexer/protocol. Override with `make PROTO=...`.
++PROTO   ?= $(patsubst %/impls/c/src/sha256.c,%,$(firstword $(wildcard ../namespace-protocol/impls/c/src/sha256.c ../indexer/protocol/impls/c/src/sha256.c)))
++ifeq ($(strip $(PROTO)),)
+ PROTO   := ../namespace-protocol
++endif
+ SMDIR   := $(PROTO)/impls/c/src
+ SHIMSRC := $(PROTO)/shim/secp_shim.c
+ 
+ # Vendored libsecp256k1 — the indexer owns the build tree the family uses
+ # (pepenet-social, its previous home, is retired).
++IDX     ?= $(patsubst %/src/db.c,%,$(firstword $(wildcard ../namespace-indexer/src/db.c ../indexer/src/db.c)))
++ifeq ($(strip $(IDX)),)
+ IDX     := ../namespace-indexer
++endif
+ SECPDIR := $(IDX)/vendor/secp256k1
+ SECPLIB := $(IDX)/build/secp/lib/libsecp256k1.a
+ 
 diff --git a/mesh/test/net_test.c b/mesh/test/net_test.c
 index c7a3b70..a98409a 100644
 --- a/mesh/test/net_test.c
@@ -2169,8 +2315,40 @@ index 1bca645..7274731 100644
  Dnsnet *dnsnet_start_inst(const struct AppInstance *inst);
  
  void dnsnet_status(DnsStatus *out);
+diff --git a/src/engine.c b/src/engine.c
+index c4bde2d..2355aa6 100644
+--- a/src/engine.c
++++ b/src/engine.c
+@@ -455,7 +455,12 @@ void engine_status(EngineStatus *out) {
+     out->last_rc = g->last_rc;  out->passes = g->passes;
+     pthread_mutex_unlock(&g->mu);
+     out->peer_height = idx_sync_peer_height;   // indexer.h seam (volatile, sync thread writes)
++    out->proj_height = -1;
++    out->best_known = idx_peer_height_note(NULL, 0, 0, 0);   // read-only: no db, no write
+     sqlite3 *db = read_db(); if (!db) return;
++    out->proj_height = idx_db_projected_height(db);
++    if (!out->best_known)                      // before the sync thread seeded it from meta
++        out->best_known = idx_db_get_peer_height(db);
+     static int64_t g_act;             // immutable per-db — read once, then cached
+     if (!g_act) g_act = idx_db_get_activation(db, 0);
+     out->activation = g_act;
+diff --git a/src/engine.h b/src/engine.h
+index edfd408..095463f 100644
+--- a/src/engine.h
++++ b/src/engine.h
+@@ -36,6 +36,10 @@ typedef struct {
+                             // height ≥ peer_height is the live at-tip signal —
+                             // pass boundaries lag it by the ~30 s a no-op pass
+                             // needs to time out against getblocks-silence.
++    int64_t  proj_height;   // height the stored names projection reflects
++                            // (db meta proj_height; -1 = none written yet)
++    int64_t  best_known;    // best peer tip ever seen (persisted meta, this or
++                            // an earlier run); 0 = never heard one
+ } EngineStatus;
+ 
+ // one names-projection row, GUI-shaped (states are sm.h SM_OWNED..SM_RESERVED)
 diff --git a/src/gd_node.c b/src/gd_node.c
-index f7a6eb0..f66822a 100644
+index f7a6eb0..dcec04b 100644
 --- a/src/gd_node.c
 +++ b/src/gd_node.c
 @@ -9,6 +9,8 @@
@@ -2182,45 +2360,85 @@ index f7a6eb0..f66822a 100644
  
  #include <errno.h>
  #include <signal.h>
-@@ -139,6 +141,9 @@ static void json_safe(char *dst, size_t cap, const char *src) {
+@@ -139,6 +141,19 @@ static void json_safe(char *dst, size_t cap, const char *src) {
      dst[o] = 0;
  }
  
++static double g_start_s;            /* process start (monotonic), for the sync grace */
++static int sync_grace_s(void) {     /* GREATDANE_NODE_SYNC_GRACE_S, 0..600, default 15 */
++    static int v = -1;
++    if (v < 0) {
++        const char *e = getenv("GREATDANE_NODE_SYNC_GRACE_S");
++        int x = e && *e ? atoi(e) : 15;
++        v = x < 0 ? 0 : x > 600 ? 600 : x;
++    }
++    return v;
++}
 +static int g_lazy_wake_w = -1;
 +static void lazy_kick(void) { if (g_lazy_wake_w >= 0) { char b = 1; (void)!write(g_lazy_wake_w, &b, 1); } }
 +
  /* One status line (no trailing newline). Field set is append-only: older
   * readers ignore the new keys. */
  static void build_status(char *out, size_t cap, const char *coin, const char *dir) {
-@@ -165,6 +170,11 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
+@@ -165,6 +180,38 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
                        : ph <= 0 ? "connecting"
                        : es.height + 2 < ph ? "syncing" : "ready";
      char dd[600]; json_safe(dd, sizeof dd, dir);
-+    /* lazy: namespace_synced = the ownership fold is at the peer tip, so every
-+     * owned name answers (READY or "loading"), never a false "unowned" */
-+    int ns_synced = es.height > 0 && ph > 0 && es.height + 2 >= ph;
++    /* lazy: namespace_synced = the ownership fold can be trusted for "unowned".
++     * Exact rule (README-greatdane-node.md / DESIGN.md §13):
++     *   base   : height > 0 AND the names projection is complete up to our own
++     *            block tip (proj_height >= height, or no projection written yet
++     *            and height < activation = nothing to fold)
++     *   online : a live peer tip is known (ph > 0)  -> synced iff height + 2 >= ph
++     *            (so never while actively catching up)
++     *   offline: at least one sync pass has finished (every dial candidate
++     *            tried once) AND since then, continuously for the connect grace
++     *            (GREATDANE_NODE_SYNC_GRACE_S, default 15 s), no live peer tip
++     *            (ph == 0) and no connected peer AND not behind the best tip
++     *            ever seen (persisted
++     *            meta peer_height: best_known == 0 or height + 2 >= best_known)
++     * "basis" says which branch held: "peers", "offline" or "none". */
++    int64_t up_s = (int64_t)(mono_s() - g_start_s);
++    int proj_ok = es.proj_height >= es.height || (es.proj_height < 0 && es.height < es.activation);
++    int base_ok = es.height > 0 && proj_ok;
++    int ns_online = base_ok && ph > 0 && es.height + 2 >= ph;
++    /* offline must HOLD for the whole grace: no peer tip and no connection,
++     * continuously, since the first finished sync pass (a mesh dial that lands
++     * later resets it; build_status runs on the one stdio thread) */
++    static double offline_since;
++    int offline_now = ph <= 0 && pin + pout == 0 && es.passes >= 1;
++    if (!offline_now) offline_since = 0;
++    else if (offline_since == 0) offline_since = mono_s();
++    int ns_offline = base_ok && offline_now && up_s >= sync_grace_s() &&
++                     mono_s() - offline_since >= sync_grace_s() &&
++                     (es.best_known <= 0 || es.height + 2 >= es.best_known);
++    int ns_synced = ns_online || ns_offline;
++    const char *ns_basis = ns_online ? "peers" : ns_offline ? "offline" : "none";
 +    DnsLazyStats lz; memset(&lz, 0, sizeof lz);
 +    if (dns_lazy_enabled()) dns_lazy_stats(&lz);
      snprintf(out, cap,
          "{\"event\":\"status\",\"coin\":\"%s\",\"height\":%lld,"
          "\"peer_height\":%lld,\"activation\":%lld,\"engine\":%d,"
-@@ -173,24 +183,45 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
+@@ -173,24 +220,48 @@ static void build_status(char *out, size_t cap, const char *coin, const char *di
          "\"dane_fail\":%lld,\"listen\":\"%s\",\"listen_port\":%d,"
          "\"listen_errno\":%d,\"listen_error\":\"%s\","
          "\"state\":\"%s\",\"sync_pct\":%.1f,\"peers_in\":%d,\"peers_out\":%d,"
 -        "\"data_dir\":\"%s\"}",
 +        "\"data_dir\":\"%s\",\"lazy\":%d,\"namespace_synced\":%s,"
-+        "\"zones_cached\":%d,\"zones_loading\":%d,\"zones_failed\":%d}",
++        "\"zones_cached\":%d,\"zones_loading\":%d,\"zones_failed\":%d,"
++        "\"namespace_sync_basis\":\"%s\",\"best_known_height\":%lld}",
          coin, (long long)es.height, (long long)es.peer_height,
          (long long)es.activation, es.running, es.pass_active,
          (long long)es.passes, ptotal, pmesh, (long long)ws.conns,
          (long long)ws.dane_ok, (long long)ws.dane_fail,
 -        lname, lport, lerr, lmsg, state, pct, pin, pout, dd);
 +        lname, lport, lerr, lmsg, state, pct, pin, pout, dd,
-+        dns_lazy_enabled(), ns_synced ? "true" : "false", lz.names, lz.loading, lz.failed);
++        dns_lazy_enabled(), ns_synced ? "true" : "false", lz.names, lz.loading, lz.failed,
++        ns_basis, (long long)es.best_known);
  }
  
  int main(int argc, char **argv) {
++    g_start_s = mono_s();
      const char *data = NULL, *only = NULL, *seeds = NULL;
      const char *snap_dir = NULL, *snap_pin = NULL;   /* idx-04 */
 -    int ephemeral = 0, stdio_ctl = 0, dane_api = 0, listen_port = -1;
@@ -2253,7 +2471,7 @@ index f7a6eb0..f66822a 100644
          else if (!strcmp(argv[i], "--seeds") && i + 1 < argc) seeds = argv[++i];
          else if (!strcmp(argv[i], "--no-listen")) listen_port = 0;
          else if (!strcmp(argv[i], "--snapshot") && i + 1 < argc) snap_dir = argv[++i];
-@@ -205,10 +236,34 @@ int main(int argc, char **argv) {
+@@ -205,10 +276,34 @@ int main(int argc, char **argv) {
          }
          else {
              fprintf(stderr, "usage: greatdane-node --data <dir> --only pep|doge [--ephemeral-ports] [--dane-api] [--stdio] [--seeds host[:port],...]\n"
@@ -2290,17 +2508,30 @@ index f7a6eb0..f66822a 100644
          fprintf(stderr, "greatdane-node: --data is required (this process never uses ~/.pepenet)\n");
          return 2;
 diff --git a/src/webproxy.c b/src/webproxy.c
-index 25c8f90..f4b19c1 100644
+index 25c8f90..b149ce0 100644
 --- a/src/webproxy.c
 +++ b/src/webproxy.c
-@@ -375,12 +375,27 @@ static void splice_raw(int a, int b) {
+@@ -11,6 +11,7 @@
+ #include "ca.h"
+ #include "proxy.h"
+ #include "resolve.h"
++#include "dns_lazy.h"   /* lazy node: one wait value (flag beats env) */
+ /* dane-08: the fold-db readers (indexer/src/db.h). Declared here, not
+  * included, because db.h pulls the protocol's sha256.h whose SHA256_CTX
+  * clashes with OpenSSL's in this translation unit. */
+@@ -375,12 +376,32 @@ static void splice_raw(int a, int b) {
  // ---- GreatDANE M3 (opt-in, --dane-api): the browser verifies DANE itself. ---
  // The node never terminates TLS in this mode: CONNECT splices raw TCP to the
  // chain A record, and GET /gd/tlsa?host= hands the browser the on-chain TLSA.
 +/* lazy node: how long /gd/tlsa and a passthrough CONNECT wait for a cold
-+ * zone before answering "loading" (GREATDANE_NODE_LAZY_WAIT_MS, 0..9000,
-+ * default 3000 -- well inside Dane's 10 s budget). */
++ * zone before answering "loading" (0..9000 ms, default 3000 -- well inside
++ * Dane's 10 s budget). One value for the whole node: the lazy conf that
++ * greatdane-node built from GREATDANE_NODE_LAZY_WAIT_MS and then
++ * --lazy-wait-ms (flag beats env), the same value the DNS resolver parks
++ * with. The env read below is only the fallback when lazy is not
++ * initialised (where nothing ever reports "loading" anyway). */
 +static int gd_lazy_wait_ms(void) {
++    if (dns_lazy_enabled()) return dns_lazy_conf()->wait_ms;   /* clamped 0..9000 by dns_lazy_init */
 +    static int v = -1;
 +    if (v < 0) {
 +        const char *e = getenv("GREATDANE_NODE_LAZY_WAIT_MS");
@@ -2321,7 +2552,7 @@ index 25c8f90..f4b19c1 100644
      default: return "bad_name";
      }
  }
-@@ -420,10 +435,14 @@ static void tlsa_api(int cfd, const char *q) {
+@@ -420,10 +441,14 @@ static void tlsa_api(int cfd, const char *q) {
      } else {
          OriginInfo oi;
          memset(&oi, 0, sizeof oi);
@@ -2337,7 +2568,7 @@ index 25c8f90..f4b19c1 100644
          if (rc == RES_OK) {
              char hex[129];
              for (size_t i = 0; i < oi.assoc_len && i < 64; i++)
-@@ -727,7 +746,14 @@ static void pac_conn(int cfd) {
+@@ -727,7 +752,14 @@ static void pac_conn(int cfd) {
          if (g->passthrough) {               // M3: raw TCP to the chain origin
              OriginInfo oi;
              memset(&oi, 0, sizeof oi);
@@ -2353,6 +2584,78 @@ index 25c8f90..f4b19c1 100644
              if (rc != RES_OK) { http_status(cfd, "404 Not Found"); return; }
              ofd = dial_origin(oi.host, oi.port);
          } else {
+diff --git a/test/gd_node_test.sh b/test/gd_node_test.sh
+index ddab6ab..4ab83ee 100755
+--- a/test/gd_node_test.sh
++++ b/test/gd_node_test.sh
+@@ -176,6 +176,67 @@ for bq in "limit=101" "limit=0" "offset=-1" "offset=x" "prefix=a_b"; do
+     R=$(gdq "/gd/names?$bq"); echo "$R" | grep -q '400 Bad Request'; check $? "/gd/names $bq → 400"; done
+ exec 9>&-; wait $NPID 2>/dev/null; NPID=
+ 
++echo "-- lazy-01..03: lazy node offline (Best In Show #1-#3) --"
++# A hand-made fixture exactly like the Dane probe: names row with only
++# name/owner/owner_type/lease_expiry/st (seller/buyer NULL), a fold tip at 1000,
++# NO peers. Before the fix the sync thread SIGSEGVed on its first pass.
++run6 l_pep pep 3 --no-listen
++python3 -c 'import sqlite3,sys
++c=sqlite3.connect(sys.argv[1])
++c.execute("INSERT OR REPLACE INTO names(name,owner,owner_type,lease_expiry,st) VALUES(?,?,0,2000000000,1)",("gdlazy01",bytes([0x44])*20))
++c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(\x27height\x27,\x271000\x27)"); c.commit()' "$T/l_pep/pep/pep.db"
++check $? "lazy-01: seeded a NULL-seller owned row + tip 1000"
++mkfifo "$T/l.in"
++env -u PEPENET_DNS_LISTEN -u GREATDANE_NODE_LAZY_WAIT_MS GREATDANE_NODE_SYNC_GRACE_S=3 "$NODE" --data "$T/l_pep" --only pep \
++    --ephemeral-ports --dane-api --stdio --no-listen --lazy --lazy-cache-dir "$T/l_pep" --seeds 127.0.0.1:9 \
++    < "$T/l.in" > "$T/l.out" 2> "$T/l.err" &
++NPID=$!; exec 9> "$T/l.in"
++i=0; while [ $i -lt 50 ] && ! grep -q '"event":"ready"' "$T/l.out" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
++PAC=$(grep -m1 '"event":"ready"' "$T/l.out" | sed 's/.*"pac":\([0-9]*\).*/\1/')
++gdc() { python3 -c 'import socket,sys
++s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),15)
++s.sendall(("CONNECT "+sys.argv[2]+":443 HTTP/1.1\r\nHost: "+sys.argv[2]+":443\r\n\r\n").encode()); b=b""
++while 1:
++    d=s.recv(4096)
++    if not d: break
++    b+=d
++print(b.decode(errors="replace").replace("\r\n"," | "))' "$PAC" "$1"; }
++t0=$(now_ms); R=$(gdq "/gd/tlsa?host=gdlazy01.pepe"); dt=$(( $(now_ms) - t0 )); echo "     ${dt}ms $R"
++echo "$R" | grep -q '"status":"loading".*"ede":14'; check $? "lazy-01: cold owned /gd/tlsa (default 3000 ms wait) -> loading, EDE 14"
++[ $dt -ge 2700 ] && [ $dt -le 4500 ]; check $? "lazy-01: default wait is 3000 ms (${dt}ms)"
++R=$(gdc gdlazy01.pepe); echo "     $R"
++echo "$R" | grep -q '503 Service Unavailable.*X-GreatDANE-Status: loading'; check $? "lazy-01: cold CONNECT -> 503 loading"
++e22=0; n=0; t0=$(now_ms)
++while [ $(( $(now_ms) - t0 )) -lt 30000 ] && kill -0 $NPID 2>/dev/null; do
++    R=$(gdq "/gd/tlsa?host=gdlazy01.pepe"); n=$((n+1))
++    echo "$R" | grep -q '"ede":22' && e22=$((e22+1))
++    gdc gdlazy01.pepe >/dev/null; sleep 0.5; done
++kill -0 $NPID 2>/dev/null; check $? "lazy-01: node alive after 30 s of queries ($n x tlsa+CONNECT, no peers)"
++[ $e22 -ge 1 ]; check $? "lazy-01: no peer -> fetch failed, EDE 22 retryable ($e22/$n)"
++R=$(gdq "/gd/tlsa?host=gdnosuch.pepe"); echo "$R" | grep -q '"status":"unowned"'; check $? "lazy-01: unowned stays unowned"
++grep -q 'malformed row field' "$T/l.err"; check $? "lazy-01: malformed fixture row logged, not fatal"
++printf '{"cmd":"status"}\n' >&9; sleep 1
++ST=$(grep '"event":"status"' "$T/l.out" | tail -1); echo "     $ST"
++echo "$ST" | grep -q '"namespace_synced":true,.*"namespace_sync_basis":"offline"'; check $? "lazy-03: offline, tip 1000, no peers after grace -> namespace_synced true (basis offline)"
++exec 9>&-; wait $NPID; rc=$?; NPID=
++[ $rc -lt 128 ]; check $? "lazy-01: clean exit (rc $rc, no signal)"
++# lazy-02: --lazy-wait-ms reaches /gd/tlsa + CONNECT, and beats the env var
++mkfifo "$T/l2.in"
++env -u PEPENET_DNS_LISTEN GREATDANE_NODE_LAZY_WAIT_MS=5000 "$NODE" --data "$T/l_pep" --only pep --ephemeral-ports --dane-api \
++    --stdio --no-listen --lazy --lazy-wait-ms 700 --seeds 127.0.0.1:9 < "$T/l2.in" > "$T/l2.out" 2> "$T/l2.err" &
++NPID=$!; exec 9> "$T/l2.in"
++i=0; while [ $i -lt 50 ] && ! grep -q '"event":"ready"' "$T/l2.out" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
++PAC=$(grep -m1 '"event":"ready"' "$T/l2.out" | sed 's/.*"pac":\([0-9]*\).*/\1/')
++grep -q 'wait=700ms' "$T/l2.err"; check $? "lazy-02: --lazy-wait-ms 700 beats GREATDANE_NODE_LAZY_WAIT_MS=5000 (LAZY line)"
++python3 -c 'import sqlite3,sys
++c=sqlite3.connect(sys.argv[1]); c.execute("INSERT OR REPLACE INTO names(name,owner,owner_type,lease_expiry,st,seller,buyer) VALUES(?,?,0,2000000000,1,zeroblob(20),zeroblob(20))",("gdlazy02",bytes([0x45])*20)); c.commit()' "$T/l_pep/pep/pep.db"
++sleep 0.3
++t0=$(now_ms); R=$(gdq "/gd/tlsa?host=gdlazy02.pepe"); dt=$(( $(now_ms) - t0 )); echo "     ${dt}ms $R"
++echo "$R" | grep -q '"status":"loading"' && [ $dt -ge 550 ] && [ $dt -le 2000 ]; check $? "lazy-02: /gd/tlsa waited the flag's 700 ms (${dt}ms)"
++t0=$(now_ms); R=$(gdc gdlazy02.pepe); dt=$(( $(now_ms) - t0 ))
++[ $dt -le 2000 ]; check $? "lazy-02: CONNECT waited the flag value too (${dt}ms)"
++exec 9>&-; wait $NPID 2>/dev/null; NPID=
++
+ echo "-- idx-04: --snapshot + --snapshot-sha256 fail closed, node falls back to full sync --"
+ SD="$T/snap"; mkdir -p "$SD"
+ head -c 8192 /dev/urandom > "$SD/state.db"
 diff --git a/tls/src/resolve.c b/tls/src/resolve.c
 index 1222499..c50beae 100644
 --- a/tls/src/resolve.c

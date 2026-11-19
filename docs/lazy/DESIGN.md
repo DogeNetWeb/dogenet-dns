@@ -177,10 +177,13 @@ The table below gives the wire/protocol status and an effort estimate for one en
    * It never returns `unowned`/`no_tlsa`/`bad_record` for such a name. `unowned` stays namespace-only, and is reliable once `namespace_synced` is true.
 4. **CONNECT** (passthrough): it blocks up to the same wait (3 s default). If still not ready, it replies `503 Service Unavailable` with
    `Retry-After: 1` and `X-GreatDANE-Status: loading`, never a 404. Ready → normal 200 splice.
-5. **Status event:** the patch appends `"lazy":0|1,"namespace_synced":true|false,"zones_cached":N,"zones_loading":N,"zones_failed":N`
+5. **Status event:** the patch appends `"lazy":0|1,"namespace_synced":true|false,"zones_cached":N,"zones_loading":N,"zones_failed":N,`
+   `"namespace_sync_basis":"peers"|"offline"|"none","best_known_height":N`
    to the stdio `{"event":"status"}` line. The fields are append-only, so old readers are unaffected.
-6. **Max blocking:** dnsd `--lazy-wait-ms` (default 3,000 ms, hard cap 9,000). greatdane-node /gd/tlsa and CONNECT
-   `GREATDANE_NODE_LAZY_WAIT_MS` (default 3,000, cap 9,000). A cold fetch from a responsive peer completes in ~25–50 ms
+   The exact `namespace_synced` rule (it also holds on an offline node) is in §13.
+6. **Max blocking:** dnsd `--lazy-wait-ms` (default 3,000 ms, hard cap 9,000). greatdane-node: ONE value for its DNS
+   park, /gd/tlsa and CONNECT: `--lazy-wait-ms` beats `GREATDANE_NODE_LAZY_WAIT_MS` beats the 3,000 default (cap 9,000).
+   (Before §13's fix the flag only reached the DNS park; /gd/tlsa + CONNECT read only the env var.) A cold fetch from a responsive peer completes in ~25–50 ms
    on loopback (see the numbers below), so the wait is only reached when peers are slow, absent or bad. That leaves Dane ≥7 s of its 10 s budget to retry.
 7. **Status endpoints.**
    * dnsd ctl socket (`--ctl <path>`, local, no key):
@@ -363,3 +366,51 @@ one `git apply` onto 35047fd, no overlay, all PepeNet APIs unchanged; the lazy
 layer is ported into the tree's own dns_net.c (lazy zgets obey P3 pacing; an
 ECDSA-throttled partial dump is "incomplete", never a vote). See
 docs/lazy/README-greatdane-node.md for the file list.
+
+## 13. Best In Show round 2 fixes (patch v2, branch commit recorded below)
+
+Reported on the c17a0f40 patch (BIS build on clean 35047fd, 0 warnings, gd_node_test 71/0):
+
+1. **SIGSEGV (exit -11) on an owned, unfetched name with no peers — ROOT CAUSE: not the lazy path.**
+   `indexer/src/db.c: idx_db_load_state()` did `memcpy(r->seller, sqlite3_column_blob(st, 5), 20)` (and the same for
+   owner/buyer). The Dane probe's synthetic fixture inserts `names(name,owner,owner_type,lease_expiry,st)` only, so
+   `seller`/`buyer` are NULL, `sqlite3_column_blob()` returns NULL, and the **sync thread** crashes on its first pass
+   (`cmd_sync` → `idx_db_load_state`, ~1–3 s after start, while `pass_active=1`). It is pre-existing: the clean,
+   unpatched 35047fd binary and a non-lazy run with no queries crash the same way. The 3,000 ms /gd/tlsa wait only made
+   the request still be open when the sync pass started; a 0–300 ms reply had already returned. ASan: `SEGV on unknown
+   address 0x0 … idx_db_load_state db.c:953 … cmd_sync sync.c:1380 … sync_thread engine.c:102` (UBSan: null pointer
+   passed as argument 2 of memcpy). The lazy wait/zget path is clean under ASan/UBSan.
+   **Fix (both trees: pepenet-desktop `indexer/src/db.c` and DogeNet `namespace-indexer/src/db.c`):** `col_blob_exact()`
+   copies a blob only when it has exactly the expected size, otherwise zero-fills (= "none"). `idx_db_load_state` also
+   skips rows with a NULL/empty/over-long name and `commits`/`muts` rows with a wrong-size blob, and logs one
+   `db: N malformed row field(s) …` line. `idx_db_resolve` / `idx_db_name_row` use the same helper. A db written by
+   the indexer always has exact-size blobs, so valid state loads byte-identically (no format, wire, fold or digest
+   change).
+2. **namespace_synced on an isolated/offline node.** Exact rule (greatdane-node `build_status`):
+   * base: `height > 0` AND the names projection covers our own block tip
+     (`proj_height >= height`, or no projection yet and `height < activation`, i.e. nothing to fold);
+   * **online** (`basis "peers"`): a live peer tip is known (`ph = max(pass handshake, live serve peers) > 0`) and
+     `height + 2 >= ph`. So it is never true while the node is catching up;
+   * **offline** (`basis "offline"`): at least one sync pass has finished (every dial candidate was tried once), and
+     since then, continuously for the connect grace (`GREATDANE_NODE_SYNC_GRACE_S`, default 15 s, 0–600), there has been
+     no live peer tip and no connected peer, AND we are not behind the best tip ever seen (`best_known_height` =
+     persisted meta `peer_height`; `0` = never heard one, else `height + 2 >= best_known_height`);
+   * otherwise false (`basis "none"`). A peer that connects later and shows a higher tip turns it false again at
+     once, so Dane must follow the live value. Offline "synced" means "complete up to the newest tip this node knows
+     of". A name claimed after that tip reads `unowned` until a peer is reachable. That is the price of opening the TLDs
+     offline at all.
+   * A fresh fixture with `height = 0` (like the Dane probe's) is never synced: there is no namespace to trust.
+3. **--lazy-wait-ms** now drives /gd/tlsa and CONNECT too (`webproxy.c gd_lazy_wait_ms()` → `dns_lazy_conf()->wait_ms`).
+4. **check-lazy paths:** `dns/Makefile` picks `../pepenet-mesh` or `../mesh`, `../namespace-indexer` or `../indexer`;
+   `mesh/Makefile` picks `../namespace-protocol` or `../indexer/protocol` (all overridable on the make line).
+   The DogeNet tree's own Makefiles are separate files and unchanged.
+
+Patch v2: `docs/lazy/greatdane-node-lazy-35047fd.patch` sha256 `96505362a4ad9dc26c6a50fbe3a0ef9c69e93ea1df86a9b422f78366615543cb`
+(v1 was c17a0f40). It applies to a clean 35047fd with `git apply` (no overlay). greatdane-node Release build on this box (gcc 14.2.0):
+0 warnings, sha256 `3aa1ce16f134d6cb70ab00f62eb740aca34efa77ead1ba132805f80e2e8cb6e3`. That hash is box-specific, so Dane's build will differ.
+
+Tests (all under `unshare -Urn`): gd_node_test gains lazy-01..03 (NULL-seller fixture + 3,000 ms cold /gd/tlsa + CONNECT +
+30 s of queries with no peers, EDE 14 then EDE 22, no crash; offline `namespace_synced` true; `--lazy-wait-ms 700` beats env 5000
+for /gd/tlsa and CONNECT). Evidence: `tests/crashfix/` and `tools/gd_lazy_offline.py`, `tools/gd_sync_rule.py`,
+`tools/null_row_probe.py`, `tools/bis_probe_tlsa_crash.py`.
+
